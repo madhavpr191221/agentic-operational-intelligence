@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "calibration_seed_range": [
+    0,
+    99
+  ],
+  "control_scenarios": [
+    "healthy",
+    "unrelated_issue",
+    "resolved_issue"
+  ],
+  "target_combined_alert_episodes_per_day": 0.1,
+  "per_method_tail_budget_per_day": 0.02,
+  "method_thresholds": {
+    "poisson": {
+      "poisson_llr": 6.751416984838976,
+      "negative_binomial_llr": 5.018057117570848,
+      "standardized_residual": 4.643716460347528,
+      "cusum": 12.472067021300319,
+      "gamma_poisson_bayes_factor": 5.448981780027479
+    },
+    "negative_binomial": {
+      "poisson_llr": 19.26619370661671,
+      "negative_binomial_llr": 6.825187774943825,
+      "standardized_residual": 8.736513415926668,
+      "cusum": 15.636229462690451,
+      "gamma_poisson_bayes_factor": 17.03200223979763
+    }
+  },
+  "thresholds": {
+    "poisson": {
+      "poisson_llr": 6.751416984838976,
+      "negative_binomial_llr": 5.018057117570848,
+      "standardized_residual": 4.643716460347528,
+      "cusum": 12.472067021300319,
+      "gamma_poisson_bayes_factor": 5.448981780027479
+    },
+    "negative_binomial": {
+      "poisson_llr": 19.26619370661671,
+      "negative_binomial_llr": 6.825187774943825,
+      "standardized_residual": 8.736513415926668,
+      "cusum": 15.636229462690451,
+      "gamma_poisson_bayes_factor": 17.03200223979763
+    }
+  },
+  "note": "Empirical thresholds from synthetic controls; re-calibrate when the generator or detector changes."
+}
