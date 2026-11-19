@@ -6,7 +6,7 @@ An operator sees an unusual ticket-volume increase and needs a fast, evidence-ba
 
 ## Desired Behavior
 
-The local application streams a reproducible fictional scenario. Ticket arrivals are stochastic. A detector evaluates each 30-minute window and emits a structured alert. After the operator asks a question, an investigator may call the detector and query synthetic support tickets, issue records, product logs, and change events. The final report ranks hypotheses and cites evidence IDs.
+The local application streams a reproducible fictional scenario. Ticket arrivals are stochastic. Independent category detectors evaluate each 30-minute window and emit a structured alert containing its category, metric, time window, observed/baseline counts, and detector scores. After the operator asks a question, a single tool-using investigator queries synthetic support tickets, issue records, product logs, and change events. The final report ranks hypotheses and cites evidence IDs.
 
 ## Initial Scenario
 
@@ -16,8 +16,8 @@ Runs span 72 simulated hours. The first 24 hours establish a normal baseline. A 
 
 - Run controls: start a scenario with seed/model/speed, pause, resume, step, and inspect status.
 - Event stream: timestamped generated events and detector alerts.
-- Investigator: selected alert plus operator question; structured ranked hypotheses and evidence references.
-- Read-only tools: detector query, ticket search, issue search, log query, and change listing.
+- Investigator: selected category alert and operator question; structured ranked hypotheses and evidence references. The UI shows persisted tool activity while the run is in progress.
+- Read-only tools: ticket search, issue search, product-log search, and change listing. Detector output is passed directly in the selected signal context rather than recalculated by the agent.
 
 ## Statistical Behavior
 
@@ -41,4 +41,4 @@ Runs span 72 simulated hours. The first 24 hours establish a normal baseline. A 
 - The planted cause is never present in tool-visible event payloads.
 - Detector metrics and RCA metrics are computed from held-out seeds.
 - Every factual report claim references returned evidence; weak evidence permits abstention.
-- The browser can run, pause, observe an alert, submit an investigation, and inspect its report.
+- The browser can run, pause, observe/select a category alert, submit an investigation, watch tool activity, and inspect its cited report.

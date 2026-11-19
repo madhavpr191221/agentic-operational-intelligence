@@ -76,6 +76,14 @@ class EventStore:
                     report_json TEXT,
                     error TEXT
                 );
+                CREATE TABLE IF NOT EXISTS investigation_events (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    investigation_id TEXT NOT NULL REFERENCES investigations(investigation_id),
+                    created_at TEXT NOT NULL,
+                    event_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_investigation_events_id_seq
+                    ON investigation_events(investigation_id, sequence);
             """)
 
     def create_run(self, scenario: str, seed: int, arrival_model: str, config: dict[str, Any]) -> str:
@@ -170,6 +178,25 @@ class EventStore:
             connection.execute("UPDATE investigations SET status=?, report_json=?, error=? WHERE investigation_id=?",
                                (status, json.dumps(report) if report is not None else None, error, investigation_id))
 
+    def add_investigation_event(self, investigation_id: str, event: dict[str, Any]) -> dict[str, Any]:
+        created_at = utc_now()
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO investigation_events(investigation_id,created_at,event_json) VALUES(?,?,?)",
+                (investigation_id, created_at, json.dumps(event)),
+            )
+            sequence = cursor.lastrowid
+        return {"sequence": sequence, "created_at": created_at, **event}
+
+    def list_investigation_events(self, investigation_id: str) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT sequence,created_at,event_json FROM investigation_events "
+                "WHERE investigation_id=? ORDER BY sequence", (investigation_id,),
+            ).fetchall()
+        return [{"sequence": row["sequence"], "created_at": row["created_at"],
+                 **json.loads(row["event_json"])} for row in rows]
+
     def get_investigation(self, investigation_id: str) -> dict[str, Any] | None:
         with self._connection() as connection:
             row = connection.execute("SELECT * FROM investigations WHERE investigation_id=?", (investigation_id,)).fetchone()
@@ -177,7 +204,8 @@ class EventStore:
             return None
         return {"investigation_id": row["investigation_id"], "run_id": row["run_id"],
                 "question": row["question"], "status": row["status"], "created_at": row["created_at"],
-                "report": json.loads(row["report_json"]) if row["report_json"] else None, "error": row["error"]}
+                "report": json.loads(row["report_json"]) if row["report_json"] else None,
+                "progress": self.list_investigation_events(investigation_id), "error": row["error"]}
 
     @staticmethod
     def _event(row: sqlite3.Row) -> dict[str, Any]:

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from agentic_ops.domain import SimulationConfig
+from agentic_ops.domain import CATEGORIES, SimulationConfig
 
 WINDOW_MINUTES = 30
 SIMULATION_START = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -29,6 +29,7 @@ class GeneratedWindow:
     start: str
     end: str
     ticket_count: int
+    category_counts: dict[str, int]
     events: list[GeneratedEvent]
 
 
@@ -147,6 +148,7 @@ def generate_run(config: SimulationConfig) -> Iterator[GeneratedWindow]:
         payment_fraction = 0.0 if expected_tickets <= 0 else min(
             0.95, (failed_attempts * config.contact_probability_per_failure) / expected_tickets
         )
+        category_counts = {category: 0 for category in CATEGORIES}
         for ticket_number in range(ticket_count):
             is_payment = rng.random() < payment_fraction
             offset = rng.randrange(WINDOW_MINUTES)
@@ -157,6 +159,7 @@ def generate_run(config: SimulationConfig) -> Iterator[GeneratedWindow]:
             else:
                 title = rng.choice(("Question about order status", "Unable to update account details", "Delivery estimate unclear"))
                 category = rng.choice(("orders", "account", "delivery"))
+            category_counts[category] += 1
             events.append(GeneratedEvent(
                 simulated_at=_iso(ticket_time), source="support_tickets", event_type="ticket_created",
                 payload={"ticket_key": f"SUP-{index:03d}-{ticket_number:03d}", "title": title,
@@ -166,4 +169,4 @@ def generate_run(config: SimulationConfig) -> Iterator[GeneratedWindow]:
 
         events.sort(key=lambda event: event.simulated_at)
         yield GeneratedWindow(index=index, start=_iso(window_start), end=_iso(window_end),
-                              ticket_count=ticket_count, events=events)
+                              ticket_count=ticket_count, category_counts=category_counts, events=events)

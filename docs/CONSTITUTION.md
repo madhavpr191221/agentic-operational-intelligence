@@ -16,4 +16,4 @@ Build a local, interview-ready demonstration of operational anomaly detection an
 
 ## Initial Product Boundary
 
-The first vertical slice is a fictional payment service and customer-support workflow. It includes stochastic ticket arrivals, a count detector, read-only synthetic evidence tools, an operator-triggered investigator, and a local interface. Metric anomaly detection beyond ticket volume is a later milestone.
+The first vertical slice is a fictional payment service and customer-support workflow. It includes stochastic ticket arrivals, category-specific count detectors, read-only synthetic evidence tools, one operator-triggered tool-using investigator, and a local interface that shows tool activity and cited RCA. Detection for CSAT, escalation rates, and other metric types remains a later milestone.

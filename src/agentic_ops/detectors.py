@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentic_ops.domain import Score
+from agentic_ops.domain import CATEGORIES, Score
 
 
 def poisson_log_likelihood_ratio(observed: int, expected: float) -> float:
@@ -71,13 +71,16 @@ class DetectorConfig:
 
 
 def calibrated_config(model: str, warmup_windows: int = 48,
-                     thresholds_path: str | Path | None = None) -> DetectorConfig:
+                     thresholds_path: str | Path | None = None,
+                     category: str | None = None) -> DetectorConfig:
     """Load model-specific thresholds produced by the calibration script."""
     path = Path(thresholds_path) if thresholds_path else Path(__file__).resolve().parents[2] / "configs" / "detector_thresholds.json"
     values: dict[str, float] = {}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         values = payload.get("thresholds", {}).get(model, {})
+        if category:
+            values = payload.get("category_thresholds", {}).get(model, {}).get(category, values)
     except (OSError, json.JSONDecodeError):
         values = {}
     return DetectorConfig(
@@ -133,9 +136,11 @@ class CountDetectorSuite:
                   self.config.negative_binomial_llr_threshold, self.expected, observed,
                   nb_score >= self.config.negative_binomial_llr_threshold,
                   f"NB upward likelihood ratio; fitted baseline shape r={self.nb_shape:.3g}."),
-            Score("standardized_residual", "z_score_poisson", poisson_z, self.config.residual_threshold,
-                  self.expected, observed, poisson_z >= self.config.residual_threshold,
-                  "Poisson model residual; threshold is calibrated empirically."),
+            Score("standardized_residual",
+                  "z_score_negative_binomial" if self.config.score_model == "negative_binomial" else "z_score_poisson",
+                  active_z, self.config.residual_threshold,
+                  self.expected, observed, active_z >= self.config.residual_threshold,
+                  f"{self.config.score_model} model residual; threshold is calibrated empirically."),
             Score("cusum", "positive_cusum", self.cusum, self.config.cusum_threshold,
                   self.expected, observed, self.cusum >= self.config.cusum_threshold,
                   f"Accumulated positive {self.config.score_model} residual excess."),
@@ -145,3 +150,22 @@ class CountDetectorSuite:
                   "Gamma-Poisson prior predictive comparison; alternative prior mean is 2x baseline."),
         ]
         return scores, any(score.anomalous for score in scores)
+
+
+class CategoryDetectorSuite:
+    """Independent count detector state for each support category."""
+
+    def __init__(self, model: str, warmup_windows: int):
+        self.suites = {
+            category: CountDetectorSuite(calibrated_config(model, warmup_windows, category=category))
+            for category in CATEGORIES
+        }
+
+    def update(self, category_counts: dict[str, int], index: int) -> dict[str, tuple[list[Score], bool]]:
+        unknown = set(category_counts) - set(self.suites)
+        if unknown:
+            raise ValueError(f"Unknown ticket categories: {', '.join(sorted(unknown))}")
+        return {
+            category: suite.update(int(category_counts.get(category, 0)), index)
+            for category, suite in self.suites.items()
+        }

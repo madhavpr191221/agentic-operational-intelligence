@@ -13,7 +13,7 @@ from typing import Any
 from dotenv import dotenv_values
 
 from agentic_ops.agent import Investigator, MockInvestigator, OpenAIInvestigator
-from agentic_ops.detectors import CountDetectorSuite, calibrated_config
+from agentic_ops.detectors import CategoryDetectorSuite
 from agentic_ops.domain import SimulationConfig
 from agentic_ops.evidence import EvidenceTools
 from agentic_ops.simulation import generate_run
@@ -83,7 +83,7 @@ class OperationsRuntime:
         return self.store.get_run(run_id) or {"run_id": run_id}
 
     def _run_simulation(self, run_id: str, config: SimulationConfig, control: RunControl) -> None:
-        suite = CountDetectorSuite(calibrated_config(config.arrival_model, config.calibration_windows))
+        suite = CategoryDetectorSuite(config.arrival_model, config.calibration_windows)
         try:
             for window in generate_run(config):
                 with control.condition:
@@ -101,21 +101,50 @@ class OperationsRuntime:
                 observation = self.store.add_event(
                     run_id, window.end, "detector", "window_observation",
                     {"window_index": window.index, "window_start": window.start, "window_end": window.end,
-                     "ticket_count": window.ticket_count},
+                     "ticket_count": window.ticket_count, "category_counts": window.category_counts},
                 )
-                scores, alerted = suite.update(window.ticket_count, window.index)
-                self.store.add_event(run_id, window.end, "detector", "window_score",
-                                     {"window_index": window.index, "observed": window.ticket_count,
-                                      "expected": suite.expected, "scores": [score.to_dict() for score in scores],
-                                      "calibration": window.index < config.calibration_windows,
-                                      "observation_evidence_id": observation["evidence_id"]})
-                if alerted:
-                    triggered = [score.detector for score in scores if score.anomalous]
-                    self.store.add_event(run_id, window.end, "detector", "anomaly_alert",
-                                         {"window_index": window.index, "window_start": window.start,
-                                          "window_end": window.end, "ticket_count": window.ticket_count,
-                                          "detectors_triggered": triggered,
-                                          "observation_evidence_id": observation["evidence_id"]})
+                category_results = suite.update(window.category_counts, window.index)
+                score_event = self.store.add_event(
+                    run_id, window.end, "detector", "window_score",
+                    {"window_index": window.index, "observed": window.ticket_count,
+                     "category_counts": window.category_counts,
+                     "scores_by_category": {
+                         category: {"observed": scores[0].observed if scores else window.category_counts[category],
+                                    "expected": scores[0].expected if scores else None,
+                                    "scores": [score.to_dict() for score in scores], "alerted": alerted}
+                         for category, (scores, alerted) in category_results.items()
+                     },
+                     "calibration": window.index < config.calibration_windows,
+                     "observation_evidence_id": observation["evidence_id"]},
+                )
+                for category, (scores, alerted) in category_results.items():
+                    if alerted:
+                        triggered = [score.detector for score in scores if score.anomalous]
+                        by_detector = {score.detector: score for score in scores}
+                        likelihood_name = ("negative_binomial_llr" if config.arrival_model == "negative_binomial"
+                                           else "poisson_llr")
+                        signal = {
+                            "metric": "support_ticket_arrivals", "category": category,
+                            "window_index": window.index, "window_start": window.start,
+                            "window_end": window.end, "window_minutes": 30,
+                            "observed": scores[0].observed, "expected": scores[0].expected,
+                            "arrival_model": config.arrival_model,
+                            "scores": {
+                                "z_score": by_detector["standardized_residual"].score,
+                                "cusum": by_detector["cusum"].score,
+                                "log_likelihood_ratio": by_detector[likelihood_name].score,
+                            },
+                        }
+                        self.store.add_event(run_id, window.end, "detector", "anomaly_alert",
+                                             {"metric": "support_ticket_arrivals", "category": category,
+                                              "window_index": window.index, "window_start": window.start,
+                                              "window_end": window.end, "ticket_count": scores[0].observed,
+                                              "expected": scores[0].expected,
+                                              "signal": signal,
+                                              "scores": [score.to_dict() for score in scores],
+                                              "detectors_triggered": triggered,
+                                              "observation_evidence_id": observation["evidence_id"],
+                                              "window_score_evidence_id": score_event["evidence_id"]})
                 if config.tick_delay_seconds > 0:
                     time.sleep(config.tick_delay_seconds)
             self.store.set_run_status(run_id, "completed")
@@ -177,9 +206,16 @@ class OperationsRuntime:
                      alert_context: dict[str, Any] | None) -> None:
         self.store.set_investigation(investigation_id, "running")
         try:
-            report = self._investigator().investigate(run_id, question, self.evidence, alert_context)
+            report = self._investigator().investigate(
+                run_id, question, self.evidence, alert_context,
+                on_progress=lambda event: self.store.add_investigation_event(investigation_id, event),
+            )
             self.store.set_investigation(investigation_id, report.status, report.to_dict())
         except Exception as exc:
+            self.store.add_investigation_event(
+                investigation_id,
+                {"type": "failed", "stage": "failed", "message": "The investigation could not be completed."},
+            )
             self.store.set_investigation(investigation_id, "failed", error=str(exc))
 
     def wait_for_run(self, run_id: str, timeout: float = 10.0) -> dict[str, Any] | None:

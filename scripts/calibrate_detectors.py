@@ -10,7 +10,7 @@ from pathlib import Path
 
 from agentic_ops.detectors import CountDetectorSuite, DetectorConfig
 from agentic_ops.domain import SimulationConfig
-from agentic_ops.simulation import generate_run
+from agentic_ops.simulation import CATEGORIES, generate_run
 
 METHODS = ("poisson_llr", "negative_binomial_llr", "standardized_residual", "cusum",
            "gamma_poisson_bayes_factor")
@@ -26,33 +26,57 @@ def _quantile(sorted_values: list[float], probability: float) -> float:
 
 def calibrate(seed_count: int = 100, target_combined_alerts_per_day: float = 0.1) -> dict:
     threshold_bundle: dict[str, dict[str, float]] = {}
+    category_bundle: dict[str, dict[str, dict[str, float]]] = {}
     method_alert_budget = target_combined_alerts_per_day / len(METHODS)
     tail = method_alert_budget / 48.0
     quantile_probability = 1.0 - tail
     for arrival_model in ("poisson", "negative_binomial"):
         samples: dict[str, list[float]] = defaultdict(list)
+        category_samples: dict[str, dict[str, list[float]]] = {
+            category: defaultdict(list) for category in CATEGORIES
+        }
         for scenario in CONTROLS:
             for seed in range(seed_count):
                 config = SimulationConfig(scenario=scenario, seed=seed, arrival_model=arrival_model)
                 suite = CountDetectorSuite(DetectorConfig(warmup_windows=config.calibration_windows,
                                                           score_model=arrival_model))
+                category_suites = {
+                    category: CountDetectorSuite(DetectorConfig(warmup_windows=config.calibration_windows,
+                                                                score_model=arrival_model))
+                    for category in CATEGORIES
+                }
                 for window in generate_run(config):
                     scores, _ = suite.update(window.ticket_count, window.index)
                     for score in scores:
                         samples[score.detector].append(score.score)
+                    for category, observed in window.category_counts.items():
+                        category_scores, _ = category_suites[category].update(observed, window.index)
+                        for score in category_scores:
+                            category_samples[category][score.detector].append(score.score)
         threshold_bundle[arrival_model] = {
             method: _quantile(sorted(samples.get(method, [])), quantile_probability)
             for method in METHODS
         }
+        category_tail = tail / len(CATEGORIES)
+        category_probability = 1.0 - category_tail
+        category_bundle[arrival_model] = {
+            category: {
+                method: _quantile(sorted(category_samples[category].get(method, [])), category_probability)
+                for method in METHODS
+            }
+            for category in CATEGORIES
+        }
     return {
-        "version": 1,
+        "version": 2,
         "calibration_seed_range": [0, seed_count - 1],
         "control_scenarios": list(CONTROLS),
         "target_combined_alert_episodes_per_day": target_combined_alerts_per_day,
         "per_method_tail_budget_per_day": method_alert_budget,
         "method_thresholds": threshold_bundle,
         "thresholds": threshold_bundle,
-        "note": "Empirical thresholds from synthetic controls; re-calibrate when the generator or detector changes.",
+        "category_thresholds": category_bundle,
+        "categories": list(CATEGORIES),
+        "note": "Empirical aggregate and category-specific thresholds from synthetic controls; re-calibrate when the generator or detector changes.",
     }
 
 

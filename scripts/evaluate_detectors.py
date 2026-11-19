@@ -6,22 +6,25 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-from agentic_ops.detectors import CountDetectorSuite, calibrated_config
+from agentic_ops.detectors import CategoryDetectorSuite
 from agentic_ops.domain import SimulationConfig
-from agentic_ops.simulation import generate_run
+from agentic_ops.simulation import CATEGORIES, generate_run
 
 METHODS = ("poisson_llr", "negative_binomial_llr", "standardized_residual", "cusum",
            "gamma_poisson_bayes_factor")
 CONTROLS = ("healthy", "unrelated_issue", "resolved_issue")
 
 
-def _run_scores(config: SimulationConfig) -> dict[str, list[tuple[int, float, bool]]]:
-    suite = CountDetectorSuite(calibrated_config(config.arrival_model, config.calibration_windows))
-    results: dict[str, list[tuple[int, float, bool]]] = defaultdict(list)
+def _run_scores(config: SimulationConfig) -> dict[str, dict[str, list[tuple[int, float, bool]]]]:
+    suite = CategoryDetectorSuite(config.arrival_model, config.calibration_windows)
+    results: dict[str, dict[str, list[tuple[int, float, bool]]]] = {
+        category: defaultdict(list) for category in CATEGORIES
+    }
     for window in generate_run(config):
-        scores, _ = suite.update(window.ticket_count, window.index)
-        for score in scores:
-            results[score.detector].append((window.index, score.score, score.anomalous))
+        category_scores = suite.update(window.category_counts, window.index)
+        for category, (scores, _) in category_scores.items():
+            for score in scores:
+                results[category][score.detector].append((window.index, score.score, score.anomalous))
     return results
 
 
@@ -51,16 +54,20 @@ def evaluate(heldout_seeds: int = 50, first_seed: int = 100) -> dict:
                 scored_days = (config.window_count - config.calibration_windows) / 48
                 if scenario in CONTROLS:
                     control_days += scored_days
-                    for method in METHODS:
-                        method_false_episodes[method] += _episode_count(values.get(method, []))
+                    for category in CATEGORIES:
+                        for method in METHODS:
+                            method_false_episodes[method] += _episode_count(values[category].get(method, []))
                     union = []
                     for index in range(config.calibration_windows, config.window_count):
-                        flagged = any(next((flag for idx, _, flag in values.get(method, []) if idx == index), False)
-                                      for method in METHODS)
+                        flagged = any(
+                            next((flag for idx, _, flag in values[category].get(method, []) if idx == index), False)
+                            for category in CATEGORIES for method in METHODS
+                        )
                         union.append((index, 0.0, flagged))
                     combined_false_episodes += _episode_count(union)
                 else:
                     onset = config.window_count - 4
+                    values = values["payments"]
                     for method in METHODS:
                         flagged_windows = [index for index, _, flagged in values.get(method, []) if flagged]
                         if any(onset <= index <= onset + 2 for index in flagged_windows):
@@ -83,6 +90,7 @@ def evaluate(heldout_seeds: int = 50, first_seed: int = 100) -> dict:
             "control_simulated_days": control_days,
         }
     return {"heldout_seeds_per_scenario": heldout_seeds, "heldout_first_seed": first_seed,
+            "evaluated_positive_category": "payments",
             "thresholds_file": str(Path("configs/detector_thresholds.json")), "results": results}
 
 

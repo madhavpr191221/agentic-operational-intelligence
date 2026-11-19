@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "calibration_seed_range": [
     0,
     99
@@ -22,7 +22,7 @@
     "negative_binomial": {
       "poisson_llr": 19.26619370661671,
       "negative_binomial_llr": 6.825187774943825,
-      "standardized_residual": 8.736513415926668,
+      "standardized_residual": 6.091953901645694,
       "cusum": 15.636229462690451,
       "gamma_poisson_bayes_factor": 17.03200223979763
     }
@@ -38,10 +38,78 @@
     "negative_binomial": {
       "poisson_llr": 19.26619370661671,
       "negative_binomial_llr": 6.825187774943825,
-      "standardized_residual": 8.736513415926668,
+      "standardized_residual": 6.091953901645694,
       "cusum": 15.636229462690451,
       "gamma_poisson_bayes_factor": 17.03200223979763
     }
   },
-  "note": "Empirical thresholds from synthetic controls; re-calibrate when the generator or detector changes."
+  "category_thresholds": {
+    "poisson": {
+      "payments": {
+        "poisson_llr": 12.684944791559262,
+        "negative_binomial_llr": 6.015555784315195,
+        "standardized_residual": 8.326914194345946,
+        "cusum": 39.36198803664792,
+        "gamma_poisson_bayes_factor": 9.752260852744158
+      },
+      "orders": {
+        "poisson_llr": 7.0319013915442445,
+        "negative_binomial_llr": 5.203467458131894,
+        "standardized_residual": 5.760221094612908,
+        "cusum": 9.959808282966733,
+        "gamma_poisson_bayes_factor": 5.013494016011598
+      },
+      "account": {
+        "poisson_llr": 6.921889793792509,
+        "negative_binomial_llr": 4.682709070236367,
+        "standardized_residual": 5.755014535836753,
+        "cusum": 12.669521403719775,
+        "gamma_poisson_bayes_factor": 4.945656681357827
+      },
+      "delivery": {
+        "poisson_llr": 6.605919244900578,
+        "negative_binomial_llr": 4.7256434269767595,
+        "standardized_residual": 5.5678099940713945,
+        "cusum": 16.94999498143096,
+        "gamma_poisson_bayes_factor": 4.747268849498557
+      }
+    },
+    "negative_binomial": {
+      "payments": {
+        "poisson_llr": 25.773883689286627,
+        "negative_binomial_llr": 8.467242892176403,
+        "standardized_residual": 11.214995292151714,
+        "cusum": 30.170543297940352,
+        "gamma_poisson_bayes_factor": 19.42773983922679
+      },
+      "orders": {
+        "poisson_llr": 10.927438121123657,
+        "negative_binomial_llr": 7.676414840188009,
+        "standardized_residual": 7.268326590665243,
+        "cusum": 16.1726021023805,
+        "gamma_poisson_bayes_factor": 7.573802777711644
+      },
+      "account": {
+        "poisson_llr": 11.610280944534686,
+        "negative_binomial_llr": 7.32557748019309,
+        "standardized_residual": 7.383991759997513,
+        "cusum": 10.68704839739668,
+        "gamma_poisson_bayes_factor": 8.386636262858438
+      },
+      "delivery": {
+        "poisson_llr": 11.34815500672966,
+        "negative_binomial_llr": 7.010130715434429,
+        "standardized_residual": 7.319098772589683,
+        "cusum": 18.878172239444453,
+        "gamma_poisson_bayes_factor": 8.582232818887157
+      }
+    }
+  },
+  "categories": [
+    "payments",
+    "orders",
+    "account",
+    "delivery"
+  ],
+  "note": "Empirical aggregate and category-specific thresholds from synthetic controls; re-calibrate when the generator or detector changes."
 }

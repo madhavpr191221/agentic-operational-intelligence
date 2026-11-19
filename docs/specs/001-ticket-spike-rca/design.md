@@ -3,11 +3,11 @@
 ## Components
 
 - **Simulator:** seeded random generators produce event windows and separate ground-truth labels.
-- **Detectors:** pure functions score observed counts; each method returns expected value, score name/value, threshold, and alert flag.
+- **Detectors:** pure functions score total and per-category observed counts; each method returns expected value, score name/value, threshold, and alert flag. Each emitted alert carries the selected metric/category/window plus Z-score, CUSUM, and model-specific log-likelihood ratio.
 - **SQLite store:** append-only run, event, alert, and investigation records; evaluator-only truth is stored separately.
 - **Evidence tools:** read-only, bounded queries over a single run and time window.
-- **Investigator:** OpenAI Responses API tool loop, strict output schema, fixed allowlist, maximum tool-call budget.
-- **API/UI:** FastAPI local service and React/TypeScript/Vite single-page operator console. SSE carries event updates; HTTP controls runs and investigations.
+- **Investigator:** one OpenAI Agents SDK agent, structured candidate notes, read-only evidence tools, adaptive bounded turns, and persisted lifecycle/tool progress. A no-tools report-composition pass checks those notes against returned records and uses a schema that restricts citations to collected evidence handles. The investigator receives detector scores as context and does not recompute them.
+- **API/UI:** FastAPI local service and React/TypeScript/Vite single-page operator console. SSE carries simulation events; HTTP controls runs and returns persisted investigation progress and reports.
 
 ## Detection Methods
 
@@ -17,7 +17,7 @@ For Poisson counts use the upward generalized log-likelihood ratio `x log(x / mu
 
 - Run or stream failure leaves the run status inspectable and does not fabricate missing events.
 - Invalid tool names/arguments are rejected; tools never accept arbitrary SQL or filesystem paths.
-- API absence/errors yield a clear investigation failure; explicit mock mode is available for offline demonstrations and tests.
+- API absence/errors yield a clear investigation failure; explicit mock mode is available for offline demonstrations and tests. Agent traces contain tool activity and results, not private model reasoning.
 - Unresolved/contradictory evidence is represented in the report rather than hidden.
 
 ## Later Metric Extension

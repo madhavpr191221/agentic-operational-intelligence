@@ -16,7 +16,7 @@
 ## Stage C - Evidence and RCA
 
 - [x] Implement read-only query tools with evidence IDs.
-- [x] Add structured OpenAI Responses tool loop and mock investigator.
+- [x] Add single-agent OpenAI Agents SDK investigator with adaptive tool use and deterministic mock mode.
 - [x] Verify truth isolation and report grounding.
 
 ## Stage D - Local Operator Experience
@@ -29,3 +29,12 @@
 
 - [ ] Add CSAT and escalation metric definitions (deferred; ticket counts are the current vertical slice).
 - [ ] Select and test metric-specific models before adding further metrics.
+
+## Stage F - Category Signals and Visible RCA Activity
+
+- [x] Generate category counts and score each category independently.
+- [x] Calibrate category-specific thresholds and extend held-out detector evaluation.
+- [x] Pass structured detector scores and window metadata into the investigator.
+- [x] Persist tool lifecycle progress and display it in the incident room.
+- [x] Define synthetic RCA evaluation cases and add a live evaluation command.
+- [ ] Run the backend suite, frontend build, detector evaluation, and a small live/mock browser walkthrough before release.

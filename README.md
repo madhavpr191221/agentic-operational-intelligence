@@ -1,13 +1,14 @@
 # Agentic Operational Intelligence
 
-A local, fictional operations-intelligence demo that detects support-ticket spikes and investigates them with evidence from synthetic issues, product logs, tickets, and changes. Detector scores identify unusual behavior; they do not establish causality. The investigator must cite evidence and may abstain when evidence is insufficient.
+A local, fictional operations-intelligence demo that detects category-specific support-ticket spikes and investigates them with evidence from synthetic issues, product logs, tickets, and changes. Detector scores identify unusual behavior; they do not establish causality. One OpenAI Agents SDK investigator adaptively uses read-only tools; a constrained report-composition step checks candidate explanations against returned evidence, cites only valid evidence handles, and may abstain when evidence is insufficient.
 
 ## What the demo includes
 
-- A seeded 72-hour simulator for payment failures and healthy, unrelated-issue, and resolved-issue controls.
+- A seeded 72-hour simulator for payment failures and healthy, unrelated-issue, and resolved-issue controls, with payments, orders, account, and delivery categories.
 - Poisson and negative-binomial ticket arrivals, scored with likelihood ratios, standardized residuals, upward CUSUM, and a Gamma–Poisson Bayes factor.
 - Synthetic, read-only evidence tools and an operator-triggered investigation that returns cited hypotheses.
-- A React interface for simulation controls, alerts, event timelines, investigation reports, and light/dark themes.
+- Empirically calibrated category-specific detector thresholds and held-out detector evaluation.
+- A React interface for simulation controls, category signals/alerts, event timelines, live investigation activity, cited reports, and light/dark themes.
 
 All records are generated locally from a reproducible seed. No external incident data is needed.
 
@@ -39,6 +40,8 @@ For offline mock investigations, set the mode before starting the backend:
 $env:AGENT_MODE = "mock"
 uv run uvicorn agentic_ops.api:app --reload --app-dir src
 ```
+
+The live workflow uses one OpenAI Agents SDK agent with a bounded adaptive tool loop, followed by one structured report-composition pass with no tools. The offline mock demonstrates the same report and activity UI without calling a model.
 
 In a second terminal, start the web interface:
 
@@ -73,7 +76,15 @@ npm ci
 npm run build
 ```
 
-The detector evaluator reports recall, false-alert rate, and detection delay across synthetic seeds and arrival assumptions.
+The detector evaluator reports per-category payment-signal recall, false-alert episodes per simulated day, and detection delay across held-out synthetic seeds and arrival assumptions. See [the RCA evaluation design](docs/experiments/002-rca-agent-evaluation.md) for the investigator rubric and control cases.
+
+Run a small live RCA evaluation with one model call per scenario (payment cause plus three controls):
+
+```powershell
+uv run python scripts/evaluate_rca.py --seed-count 1
+```
+
+This requires the OpenAI key and makes live model calls. Increase `--seed-count` for a broader estimate; the script reports evidence support, unsupported control claims, valid citations, tool calls, and duration.
 
 ## Project layout
 

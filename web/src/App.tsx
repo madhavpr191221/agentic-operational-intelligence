@@ -21,6 +21,14 @@ type Run = {
 type Investigation = {
   investigation_id: string
   status: string
+  progress?: Array<{
+    sequence: number
+    created_at: string
+    type: string
+    stage: string
+    tool?: string
+    message: string
+  }>
   report?: {
     status: string
     summary: string
@@ -49,7 +57,7 @@ function timeLabel(value: string) {
   return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
-function CountChart({ points }: { points: Array<{ index: number; count: number }> }) {
+function CountChart({ points, category }: { points: Array<{ index: number; count: number }>; category: string }) {
   const recent = points.slice(-54)
   const max = Math.max(8, ...recent.map((point) => point.count))
   const width = 760
@@ -63,7 +71,7 @@ function CountChart({ points }: { points: Array<{ index: number; count: number }
   return (
     <div className="chart-wrap">
       <div className="chart-scale"><span>{max}</span><span>{Math.round(max / 2)}</span><span>0</span></div>
-      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label="Ticket counts by 30-minute window">
+        <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={`${category === 'all' ? 'All category' : category} ticket counts by 30-minute window`}>
         <defs>
           <linearGradient id="areaFill" x1="0" x2="0" y1="0" y2="1">
             <stop offset="0%" stopColor="var(--mint)" stopOpacity=".25" />
@@ -89,6 +97,7 @@ function App() {
     }
   })
   const [scenario, setScenario] = useState('payment_issue')
+  const [signalCategory, setSignalCategory] = useState('all')
   const [arrivalModel, setArrivalModel] = useState('poisson')
   const [seed, setSeed] = useState(42)
   const [speed, setSpeed] = useState('normal')
@@ -178,7 +187,9 @@ function App() {
   const observations = useMemo(() => events.filter((event) => event.event_type === 'window_observation'), [events])
   const points = observations.map((event) => ({
     index: Number(event.payload.window_index),
-    count: Number(event.payload.ticket_count),
+    count: signalCategory === 'all'
+      ? Number(event.payload.ticket_count)
+      : Number((event.payload.category_counts as Record<string, number> | undefined)?.[signalCategory] ?? 0),
   }))
   const latestCount = points.at(-1)?.count ?? 0
   const baseline = points.slice(0, Math.min(48, points.length)).reduce((sum, point) => sum + point.count, 0) /
@@ -226,7 +237,11 @@ function App() {
   const evidenceMap = new Map((investigation?.report?.evidence ?? []).map((item) => [item.evidence_id, item]))
   const runState = run?.status ?? 'ready'
   const runStateLabel = runState === 'running' ? 'Generating events' : runState === 'completed' ? 'Run complete' : runState
-  const alertScore = selectedAlert ? `${selectedAlert.payload.ticket_count} tickets / 30 min` : 'Waiting for alert'
+  const alertCategory = String(selectedAlert?.payload.category ?? 'all')
+  const alertScore = selectedAlert
+    ? `${selectedAlert.payload.ticket_count} ${alertCategory} tickets / 30 min · expected ${Number(selectedAlert.payload.expected ?? 0).toFixed(1)}`
+    : 'Waiting for alert'
+  const detectorScoreFields = (selectedAlert?.payload.signal as { scores?: Record<string, number> } | undefined)?.scores ?? {}
 
   return (
     <main className="app-shell">
@@ -299,7 +314,7 @@ function App() {
           </div>}
 
           <div className="stat-grid">
-            <article className="stat-card panel"><div className="stat-label">TICKETS · LAST WINDOW <span className="stat-icon mint">↗</span></div><div className="stat-value">{latestCount}<span className="stat-unit">tickets</span></div><div className="stat-foot"><span className="mint-text">{points.length ? `${ratio.toFixed(1)}×` : '—'}</span> vs. initial baseline</div></article>
+            <article className="stat-card panel"><div className="stat-label">{signalCategory === 'all' ? 'ALL' : signalCategory.toUpperCase()} TICKETS · LAST WINDOW <span className="stat-icon mint">↗</span></div><div className="stat-value">{latestCount}<span className="stat-unit">tickets</span></div><div className="stat-foot"><span className="mint-text">{points.length ? `${ratio.toFixed(1)}×` : '—'}</span> vs. initial baseline</div></article>
             <article className="stat-card panel"><div className="stat-label">ALERT EVENTS <span className="stat-icon amber">⌁</span></div><div className="stat-value">{alerts.length.toString().padStart(2, '0')}</div><div className="stat-foot">Detector alerts emitted in this run</div></article>
             <article className="stat-card panel"><div className="stat-label">INVESTIGATION <span className="stat-icon blue">✳</span></div><div className="stat-value small-value">{investigation?.status ?? '—'}</div><div className="stat-foot">Operator-triggered · evidence-linked</div></article>
             <article className="stat-card panel"><div className="stat-label">WINDOW SIZE <span className="stat-icon violet">◷</span></div><div className="stat-value">30<span className="stat-unit">min</span></div><div className="stat-foot">Ticket count scoring interval</div></article>
@@ -307,10 +322,10 @@ function App() {
 
           <div className="content-grid">
             <section className="panel chart-panel">
-              <div className="panel-heading"><div><div className="section-kicker">SIGNAL OVERVIEW</div><h2>Support ticket arrivals</h2></div><div className="chart-legend"><i /> Tickets <span>·</span> 30 min</div></div>
-              <CountChart points={points} />
+              <div className="panel-heading"><div><div className="section-kicker">SIGNAL OVERVIEW</div><h2>Support ticket arrivals</h2></div><div className="chart-tools"><label className="signal-category-filter"><span>Category</span><select value={signalCategory} onChange={(event) => setSignalCategory(event.target.value)}><option value="all">All tickets</option><option value="payments">Payments</option><option value="orders">Orders</option><option value="account">Account</option><option value="delivery">Delivery</option></select></label><div className="chart-legend"><i /> Tickets <span>·</span> 30 min</div></div></div>
+              <CountChart points={points} category={signalCategory} />
               <div className="chart-summary"><span><i className="legend-dot normal-dot" /> Normal baseline</span><span><i className="legend-dot alert-dot" /> Incident window</span><span className="chart-model">Model: {arrivalModel === 'poisson' ? 'Poisson' : 'Negative binomial'}</span></div>
-              <div className="detector-ribbon"><div className="ribbon-icon">∑</div><div><strong>Detector ensemble</strong><small>Poisson & NB likelihood · standardized residual · CUSUM · Gamma-Poisson BF</small></div><span className="ribbon-state">{points.length ? 'SCORING' : 'IDLE'}</span></div>
+              <div className="detector-ribbon"><div className="ribbon-icon">∑</div><div><strong>Category detector ensemble</strong><small>Per-category Poisson & NB likelihood · Z-score · CUSUM · Gamma-Poisson BF</small></div><span className="ribbon-state">{points.length ? 'SCORING' : 'IDLE'}</span></div>
             </section>
 
             <section className="panel timeline-panel">
@@ -326,7 +341,9 @@ function App() {
 
             <section className="panel alert-panel">
               <div className="panel-heading"><div><div className="section-kicker">DETECTION OUTPUT</div><h2>Active alert</h2></div><span className={`alert-badge ${selectedAlert ? 'has-alert' : ''}`}>{selectedAlert ? 'NEEDS REVIEW' : 'NO ALERT'}</span></div>
-              {selectedAlert ? <div className="alert-body"><div className="alert-mark">!</div><div className="alert-copy"><strong>Ticket volume increased</strong><p>{alertScore} · window {String(selectedAlert.payload.window_index)}</p><div className="detector-tags">{(selectedAlert.payload.detectors_triggered as string[] ?? []).map((detector) => <span key={detector}>{detector.replaceAll('_', ' ')}</span>)}</div></div><button className="text-button" onClick={() => setSelectedAlert(alerts.at(-1) ?? null)}>Latest alert ↗</button></div>
+              {selectedAlert ? <><div className="alert-body"><div className="alert-mark">!</div><div className="alert-copy"><strong>{alertCategory === 'all' ? 'Ticket volume increased' : `${alertCategory} ticket volume increased`}</strong><p>{alertScore} · window {String(selectedAlert.payload.window_index)}</p><div className="detector-tags">{(selectedAlert.payload.detectors_triggered as string[] ?? []).map((detector) => <span key={detector}>{detector.replaceAll('_', ' ')}</span>)}</div><div className="detector-values">{Object.entries(detectorScoreFields).map(([name, value]) => <span key={name}>{name.replaceAll('_', ' ')} <b>{Number(value).toFixed(2)}</b></span>)}</div></div></div>
+                {alerts.length > 1 && <div className="alert-history" aria-label="Recent category alerts">{alerts.slice(-6).reverse().map((alert) => <button type="button" key={alert.evidence_id} className={selectedAlert.evidence_id === alert.evidence_id ? 'selected' : ''} onClick={() => setSelectedAlert(alert)}>{String(alert.payload.category)} · W{String(alert.payload.window_index)}</button>)}</div>}
+              </>
                 : <div className="alert-empty"><span className="pulse-ring" />No threshold crossing yet. The independent detector is evaluating each window.</div>}
             </section>
 
@@ -335,6 +352,7 @@ function App() {
               <div className="investigator-prompt"><div className="prompt-avatar">AR</div><div><strong>Operator question</strong><small>Investigate the selected alert using available evidence.</small></div></div>
               <div className="ask-row"><input value={question} onChange={(event) => setQuestion(event.target.value)} disabled={!selectedAlert || investigation?.status === 'running'} aria-label="Question for investigator" /><button className="ask-button" onClick={investigate} disabled={!selectedAlert || !question.trim() || investigation?.status === 'running'}>{investigation?.status === 'running' ? 'Investigating…' : 'Investigate  ↗'}</button></div>
               {!selectedAlert && <div className="investigator-hint">An alert will appear here when a detector threshold is crossed.</div>}
+              {investigation?.progress && investigation.progress.length > 0 && <div className="investigation-progress" aria-live="polite"><div className="progress-heading"><strong>{investigation.status === 'running' ? 'Investigation in progress' : 'Investigation activity'}</strong><span>{investigation.progress.length} steps</span></div>{investigation.progress.map((step) => <div className={`progress-step ${step.type}`} key={step.sequence}><i />{step.tool ? <><code>{step.tool}</code><span>{step.message}</span></> : <span>{step.message}</span>}</div>)}</div>}
               {investigation?.status === 'failed' && <div className="investigation-error">{investigation.error || 'Investigation failed. Check API key or select offline demo mode.'}</div>}
               {investigation?.report && <div className="report-content">
                 <div className={`report-status ${investigation.report.status}`}>{investigation.report.status === 'completed' ? 'EVIDENCE REVIEW COMPLETE' : investigation.report.status === 'incomplete' ? 'PARTIAL INVESTIGATION' : 'INSUFFICIENT EVIDENCE'}</div>
