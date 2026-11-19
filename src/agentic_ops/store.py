@@ -151,6 +151,19 @@ class EventStore:
                                                             for term in terms)]
         return list(reversed(records[-limit:]))
 
+    def get_events_by_evidence_ids(self, run_id: str, evidence_ids: list[str]) -> list[dict[str, Any]]:
+        """Resolve a small caller-supplied citation set within one run only."""
+        ids = list(dict.fromkeys(evidence_ids))[:20]
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM events WHERE run_id=? AND evidence_id IN ({placeholders}) ORDER BY sequence",
+                (run_id, *ids),
+            ).fetchall()
+        return [self._event(row) for row in rows]
+
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self._connection() as connection:
             row = connection.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()

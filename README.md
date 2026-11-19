@@ -7,6 +7,9 @@ A local, fictional operations-intelligence demo that detects category-specific s
 - A seeded 72-hour simulator for payment failures and healthy, unrelated-issue, and resolved-issue controls, with payments, orders, account, and delivery categories.
 - Poisson and negative-binomial ticket arrivals, scored with likelihood ratios, standardized residuals, upward CUSUM, and a Gamma–Poisson Bayes factor.
 - Synthetic, read-only evidence tools and an operator-triggered investigation that returns cited hypotheses.
+- One synthetic customer message per ticket, with observable reason, category, channel, and timestamp fields. Each message is the ticket record counted by the detector; no-contact customers are outside this dataset.
+- Deterministic investigator tools compare categories, rank ticket reasons/channels, build an incident timeline, and compare before/after ticket and service-error rates.
+- Evidence-grounded fictional runbook suggestions include a verification check and never execute operational changes.
 - Empirically calibrated category-specific detector thresholds and held-out detector evaluation.
 - Four small-multiple category charts with independent scales, alert episodes, selectable representative windows, event timelines, investigation activity, category-level cited reports, and light/dark themes.
 
@@ -57,7 +60,7 @@ npm ci
 npm run dev
 ```
 
-Open the local URL printed by Vite. Choose a scenario and start a run. The **LOCAL SIMULATOR** label means the event data is synthetic and generated locally; the investigator calls OpenAI when you submit an investigation. Compare the four category charts, then in **Alert episodes** select one episode per category. The strongest alert window is preselected; use its window menu to choose another alert in that episode. Click **Investigate** to send the selected category signals to the investigator. The report gives a separate finding for each selected category and can abstain when the evidence does not establish a cause.
+Open the local URL printed by Vite. Choose a scenario and start a run. The **LOCAL SIMULATOR** label means the event data is synthetic and generated locally; the investigator calls OpenAI when you submit an investigation. Compare the four category charts, then in **Alert episodes** select one episode per category. The strongest alert window is preselected; use its window menu to choose another alert in that episode. Click **Investigate** to send the selected category signals to the investigator. The report gives a separate finding for each selected category and can abstain when the evidence does not establish a cause. Inspect the synthetic message bodies in **Latest support tickets** and open **Evidence records** to review the text behind citations. Suggested next steps are advisory only and include checks for verifying recovery.
 
 If uv cannot initialize its default cache on Windows, use the ignored project-local cache before running uv:
 

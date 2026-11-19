@@ -79,6 +79,16 @@ class CategoryFinding:
 
 
 @dataclass
+class Recommendation:
+    category: str
+    runbook_id: str | None
+    title: str
+    next_step: str
+    verification: str
+    supporting_evidence: list[str] = field(default_factory=list)
+
+
+@dataclass
 class RCAReport:
     status: Literal["completed", "abstained", "incomplete", "failed"]
     summary: str
@@ -88,6 +98,7 @@ class RCAReport:
     tool_trace: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
     category_findings: list[CategoryFinding] = field(default_factory=list)
+    recommendations: list[Recommendation] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

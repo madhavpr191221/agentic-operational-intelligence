@@ -49,6 +49,14 @@ type Investigation = {
     evidence: Array<{ evidence_id: string; source: string; observed_at: string; summary: string }>
     unresolved_questions: string[]
     tool_trace: Array<{ tool: string; arguments?: Record<string, unknown>; result?: unknown }>
+    recommendations?: Array<{
+      category: string
+      runbook_id: string | null
+      title: string
+      next_step: string
+      verification: string
+      supporting_evidence: string[]
+    }>
   } | null
   error?: string | null
 }
@@ -488,6 +496,8 @@ function App() {
                 </section>)}
                 {investigation.report.hypotheses.filter((hypothesis) => (hypothesis.categories?.length ?? 0) > 1).length > 0 && <section className="shared-findings"><h3>Possible shared causes</h3>{investigation.report.hypotheses.filter((hypothesis) => (hypothesis.categories?.length ?? 0) > 1).map((hypothesis) => <article className="hypothesis" key={`shared-${hypothesis.rank}-${hypothesis.title}`}><div className="hypothesis-main"><strong>{hypothesis.title}</strong><p>{hypothesis.explanation}</p><small>Categories: {hypothesis.categories?.join(', ')}</small><div className="citation-list">{hypothesis.supporting_evidence.map((id) => { const item = evidenceMap.get(id); return <span className="citation" key={id}>↳ {item?.source ?? 'tool evidence'} · {id.slice(0, 8)}</span> })}</div></div></article>)}</section>}
                 {investigation.report.unresolved_questions.length > 0 && <div className="unresolved"><strong>Still unknown</strong>{investigation.report.unresolved_questions.map((item) => <p key={item}>{item}</p>)}</div>}
+                {(investigation.report.recommendations ?? []).length > 0 && <section className="recommendations"><h3>Suggested next steps</h3><p>Advisory only. The investigator does not execute operational changes.</p>{(investigation.report.recommendations ?? []).map((item) => <article className="recommendation" key={`${item.category}-${item.runbook_id ?? item.title}`}><div className="category-finding-heading"><strong>{item.title}</strong><span>{item.runbook_id ?? 'MORE EVIDENCE NEEDED'}</span></div><p>{item.next_step}</p><small>Verify: {item.verification}</small>{item.supporting_evidence.length > 0 && <div className="citation-list">Evidence: {item.supporting_evidence.map((id) => { const evidence = evidenceMap.get(id); return <span className="citation" key={id} title={evidence?.summary}>{evidence?.source ?? 'evidence'} · {id.slice(0, 8)}</span> })}</div>}</article>)}</section>}
+                <details className="evidence-details"><summary>Evidence records · {investigation.report.evidence.length} available</summary><div>{investigation.report.evidence.map((item) => <article key={item.evidence_id}><strong>{item.source} · {timeLabel(item.observed_at)}</strong><p>{item.summary}</p><code>{item.evidence_id}</code></article>)}</div></details>
                 <details className="trace-details"><summary>Investigation trace · {investigation.report.tool_trace.length} tool results</summary><div className="trace-list">{investigation.report.tool_trace.map((item, index) => <div key={`${item.tool}-${index}`}><code>{item.tool}</code><pre>{JSON.stringify(item.result, null, 2)}</pre></div>)}</div></details>
               </div>}
             </section>
@@ -495,7 +505,8 @@ function App() {
 
           <section className="panel feed-panel">
             <div className="panel-heading"><div><div className="section-kicker">RECENT CUSTOMER SIGNAL</div><h2>Latest support tickets</h2></div><span className="record-count">{recentTickets.length} shown</span></div>
-            {recentTickets.length === 0 ? <div className="feed-empty">New synthetic tickets will appear as the event stream advances.</div> : <div className="ticket-table"><div className="ticket-header"><span>TICKET</span><span>SUMMARY</span><span>CHANNEL</span><span>TIME</span></div>{recentTickets.map((ticket) => <div className="ticket-row" key={ticket.evidence_id}><span className="ticket-key">{String(ticket.payload.ticket_key)}</span><span><i className={`category-dot ${ticket.payload.category === 'payments' ? 'payment' : ''}`} />{String(ticket.payload.title)}</span><span className="ticket-channel">{String(ticket.payload.channel)}</span><time>{timeLabel(ticket.simulated_at)}</time></div>)}</div>}
+            <p className="panel-subtitle">Each row is one customer message and one ticket. Messages are synthetic; no-contact customers do not appear in this feed.</p>
+            {recentTickets.length === 0 ? <div className="feed-empty">New synthetic tickets will appear as the event stream advances.</div> : <div className="ticket-table"><div className="ticket-header"><span>TICKET</span><span>CUSTOMER MESSAGE</span><span>CHANNEL</span><span>TIME</span></div>{recentTickets.map((ticket) => <div className="ticket-row" key={ticket.evidence_id}><span className="ticket-key">{String(ticket.payload.ticket_key)}</span><span className="ticket-summary"><strong><i className={`category-dot ${ticket.payload.category === 'payments' ? 'payment' : ''}`} />{String(ticket.payload.title)}</strong><small>{String(ticket.payload.body ?? '')}</small><details><summary>Read full message</summary><p>{String(ticket.payload.body ?? '')}</p></details><em>{String(ticket.payload.reason ?? 'support contact').replaceAll('_', ' ')}</em></span><span className="ticket-channel">{String(ticket.payload.channel)}</span><time>{timeLabel(ticket.simulated_at)}</time></div>)}</div>}
           </section>
 
           <footer className="footer-note"><span>◈</span> Local synthetic environment <i /> Statistical scores are diagnostic evidence, not proof of causality.</footer>

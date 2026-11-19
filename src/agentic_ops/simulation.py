@@ -78,6 +78,9 @@ def generate_run(config: SimulationConfig) -> Iterator[GeneratedWindow]:
         raise ValueError("contact_probability_per_failure must be between 0 and 1")
 
     rng = random.Random(config.seed)
+    # Keep message wording randomness separate so text generation never changes
+    # the seeded count process or its detector inputs.
+    message_rng = random.Random(config.seed ^ 0x5A17C9E3)
     start = SIMULATION_START
     issue_window = min(config.calibration_windows, config.window_count // 3)
     resolved_window = min(issue_window + 12, config.window_count - 1)
@@ -154,15 +157,41 @@ def generate_run(config: SimulationConfig) -> Iterator[GeneratedWindow]:
             offset = rng.randrange(WINDOW_MINUTES)
             ticket_time = window_start + timedelta(minutes=offset)
             if is_payment:
-                title = rng.choice(("Payment did not go through", "Checkout showed an authorization error", "Charged attempt failed"))
+                # Preserve the pre-message stream's random draw count while
+                # keeping message wording independent of detector arrivals.
+                rng.choice(("Payment did not go through", "Checkout showed an authorization error", "Charged attempt failed"))
+                reason, title, body = message_rng.choice((
+                    ("authorization_failure", "Payment did not go through", "I tried to pay at checkout, but the payment did not go through. The authorization request timed out."),
+                    ("authorization_failure", "Checkout showed an authorization error", "Checkout returned an authorization error when I submitted payment, so I could not complete the purchase."),
+                    ("payment_timeout", "Payment is still processing", "I have been waiting for the payment confirmation, but checkout timed out before showing whether it worked."),
+                    ("charge_attempt_failed", "Charged attempt failed", "My payment attempt failed after waiting for a response. I still cannot tell whether the order was placed."),
+                ))
                 category = "payments"
             else:
-                title = rng.choice(("Question about order status", "Unable to update account details", "Delivery estimate unclear"))
+                rng.choice(("Question about order status", "Unable to update account details", "Delivery estimate unclear"))
                 category = rng.choice(("orders", "account", "delivery"))
+                reason, title, body = message_rng.choice({
+                    "orders": (
+                        ("order_status", "Question about order status", "I placed an order but its status has not changed. Can you confirm whether it is being processed?"),
+                        ("order_status", "Order status has not updated", "The confirmation arrived, but the order page still says processing. Please check its status."),
+                        ("order_status", "Checking on my order", "I cannot see a recent update for my order and would like to know when it will ship."),
+                    ),
+                    "account": (
+                        ("account_update", "Unable to update account details", "I cannot save the changes to my account details. The page returns me to the same form."),
+                        ("account_update", "Account change will not save", "I updated my profile information, but it reverts when I return to the account page."),
+                        ("account_update", "Problem changing account details", "The account form reports a problem when I try to save my updated details."),
+                    ),
+                    "delivery": (
+                        ("delivery_estimate", "Delivery estimate unclear", "The delivery estimate keeps changing and I do not know when the package will arrive."),
+                        ("delivery_estimate", "Package delivery date changed", "My package date moved again and the tracking page does not explain the delay."),
+                        ("delivery_estimate", "Question about delivery timing", "Could you confirm the delivery date? The estimate on my order is unclear."),
+                    ),
+                }[category])
             category_counts[category] += 1
             events.append(GeneratedEvent(
                 simulated_at=_iso(ticket_time), source="support_tickets", event_type="ticket_created",
-                payload={"ticket_key": f"SUP-{index:03d}-{ticket_number:03d}", "title": title,
+                payload={"ticket_key": f"SUP-{index:03d}-{ticket_number:03d}", "window_index": index, "title": title,
+                         "body": body, "reason": reason,
                          "category": category, "channel": rng.choice(("web", "email", "chat")),
                          "customer_tier": rng.choice(("standard", "standard", "plus"))},
             ))

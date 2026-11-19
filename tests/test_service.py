@@ -51,6 +51,11 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(cited)
         self.assertTrue(cited.issubset(evidence_ids))
         self.assertEqual([finding["category"] for finding in report["category_findings"]], ["payments"])
+        ticket_evidence = [item for item in report["evidence"] if item["source"] == "support_tickets"]
+        self.assertTrue(any(item["summary"] != "ticket_created" for item in ticket_evidence))
+        self.assertTrue(report["recommendations"])
+        for recommendation in report["recommendations"]:
+            self.assertTrue(set(recommendation["supporting_evidence"]).issubset(evidence_ids))
 
     def test_investigation_rejects_duplicate_categories(self):
         config = SimulationConfig(seed=4, window_count=52, calibration_windows=20,
