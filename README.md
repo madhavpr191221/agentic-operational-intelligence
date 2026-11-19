@@ -8,7 +8,7 @@ A local, fictional operations-intelligence demo that detects category-specific s
 - Poisson and negative-binomial ticket arrivals, scored with likelihood ratios, standardized residuals, upward CUSUM, and a Gamma–Poisson Bayes factor.
 - Synthetic, read-only evidence tools and an operator-triggered investigation that returns cited hypotheses.
 - Empirically calibrated category-specific detector thresholds and held-out detector evaluation.
-- A React interface for simulation controls, category signals/alerts, event timelines, live investigation activity, cited reports, and light/dark themes.
+- Four small-multiple category charts with independent scales, alert episodes, selectable representative windows, event timelines, investigation activity, category-level cited reports, and light/dark themes.
 
 All records are generated locally from a reproducible seed. No external incident data is needed.
 
@@ -32,7 +32,13 @@ In the first terminal, start the backend:
 uv run uvicorn agentic_ops.api:app --reload --app-dir src
 ```
 
-For live investigations, copy `.env.example` to `.env` and set `OPENAI_API_KEY` in `.env`. The backend reads that key only when an investigation is requested. You may set `OPENAI_MODEL` in the shell to choose a model. Keep `.env` private; it is ignored by Git.
+For live investigations, copy `.env.example` to `.env` and set `OPENAI_API_KEY` in `.env`. OpenAI investigation is the default; clear any mock-mode setting in the current PowerShell session before starting the backend:
+
+```powershell
+Remove-Item Env:AGENT_MODE -ErrorAction SilentlyContinue
+```
+
+The backend reads the key only when an investigation is requested. You may set `OPENAI_MODEL` in the shell to choose a model. Keep `.env` private; it is ignored by Git.
 
 For offline mock investigations, set the mode before starting the backend:
 
@@ -51,7 +57,7 @@ npm ci
 npm run dev
 ```
 
-Open the local URL printed by Vite. Choose a scenario and start a run. When a detector alert appears, ask the investigator to examine it. The payment-failure scenario is designed to connect a ticket spike with an unresolved synthetic payment issue and supporting records.
+Open the local URL printed by Vite. Choose a scenario and start a run. The **LOCAL SIMULATOR** label means the event data is synthetic and generated locally; the investigator calls OpenAI when you submit an investigation. Compare the four category charts, then in **Alert episodes** select one episode per category. The strongest alert window is preselected; use its window menu to choose another alert in that episode. Click **Investigate** to send the selected category signals to the investigator. The report gives a separate finding for each selected category and can abstain when the evidence does not establish a cause.
 
 If uv cannot initialize its default cache on Windows, use the ignored project-local cache before running uv:
 

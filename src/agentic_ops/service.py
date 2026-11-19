@@ -14,7 +14,7 @@ from dotenv import dotenv_values
 
 from agentic_ops.agent import Investigator, MockInvestigator, OpenAIInvestigator
 from agentic_ops.detectors import CategoryDetectorSuite
-from agentic_ops.domain import SimulationConfig
+from agentic_ops.domain import CATEGORIES, SimulationConfig
 from agentic_ops.evidence import EvidenceTools
 from agentic_ops.simulation import generate_run
 from agentic_ops.store import EventStore
@@ -182,20 +182,39 @@ class OperationsRuntime:
         return {"run_id": run_id, "action": action, "status": (self.store.get_run(run_id) or {}).get("status")}
 
     def start_investigation(self, run_id: str, question: str,
-                            alert_evidence_id: str | None = None) -> dict[str, Any]:
+                            alert_evidence_id: str | None = None,
+                            alert_evidence_ids: list[str] | None = None) -> dict[str, Any]:
         if self.store.get_run(run_id) is None:
             raise KeyError("Unknown run")
-        alerts = self.store.search_events(run_id, ("detector",), limit=200,
+        alerts = self.store.search_events(run_id, ("detector",), limit=1000,
                                           event_types=("anomaly_alert",))
-        if alert_evidence_id:
-            alert = next((event for event in alerts if event["evidence_id"] == alert_evidence_id), None)
-            if alert is None:
-                raise ValueError("Selected alert does not belong to this run")
+        if alert_evidence_id and alert_evidence_ids:
+            raise ValueError("Use either alert_evidence_id or alert_evidence_ids, not both")
+        selected_ids = alert_evidence_ids or ([alert_evidence_id] if alert_evidence_id else [])
+        if selected_ids:
+            if len(selected_ids) > len(CATEGORIES) or len(set(selected_ids)) != len(selected_ids):
+                raise ValueError("Select one distinct alert episode for at most four categories")
+            alerts_by_id = {event["evidence_id"]: event for event in alerts}
+            selected_alerts = [alerts_by_id.get(evidence_id) for evidence_id in selected_ids]
+            if any(alert is None for alert in selected_alerts):
+                raise ValueError("Every selected alert must belong to this run")
+            selected_categories = [str(alert["payload"].get("category", "")) for alert in selected_alerts]
+            if any(category not in CATEGORIES for category in selected_categories):
+                raise ValueError("A selected alert has an unsupported category")
+            if len(set(selected_categories)) != len(selected_categories):
+                raise ValueError("Select no more than one alert episode per category")
         else:
-            alert = alerts[-1] if alerts else None
+            selected_alerts = [alerts[-1]] if alerts else []
         investigation_id = self.store.create_investigation(run_id, question)
-        context = ({"evidence_id": alert["evidence_id"], "simulated_at": alert["simulated_at"],
-                    **alert["payload"]} if alert else None)
+        selected_signals = [
+            {"evidence_id": alert["evidence_id"], "simulated_at": alert["simulated_at"],
+             **alert["payload"]}
+            for alert in selected_alerts
+        ]
+        context = ({"selected_signals": selected_signals,
+                    "categories": [signal["category"] for signal in selected_signals],
+                    **(selected_signals[0] if len(selected_signals) == 1 else {})}
+                   if selected_signals else None)
         worker = threading.Thread(target=self._investigate,
                                   args=(investigation_id, run_id, question, context), daemon=True,
                                   name=f"investigation-{investigation_id[:8]}")

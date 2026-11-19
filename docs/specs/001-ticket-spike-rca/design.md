@@ -7,7 +7,8 @@
 - **SQLite store:** append-only run, event, alert, and investigation records; evaluator-only truth is stored separately.
 - **Evidence tools:** read-only, bounded queries over a single run and time window.
 - **Investigator:** one OpenAI Agents SDK agent, structured candidate notes, read-only evidence tools, adaptive bounded turns, and persisted lifecycle/tool progress. A no-tools report-composition pass checks those notes against returned records and uses a schema that restricts citations to collected evidence handles. The investigator receives detector scores as context and does not recompute them.
-- **API/UI:** FastAPI local service and React/TypeScript/Vite single-page operator console. SSE carries simulation events; HTTP controls runs and returns persisted investigation progress and reports.
+- **API/UI:** FastAPI local service and React/TypeScript/Vite single-page operator console. SSE carries simulation events; HTTP controls runs and returns persisted investigation progress and reports. The incident room renders four independent category charts, groups adjacent anomaly alerts into episodes, and submits one representative alert window per selected category. The API retains the legacy single-alert field while accepting a bounded list of up to four IDs.
+- **Category RCA:** The investigator receives only the selected category/window records. The report composer returns a finding for each selected category and separate shared-cause candidates; application validation retains only selected categories and citations present in returned evidence. Unselected categories are not investigated.
 
 ## Detection Methods
 

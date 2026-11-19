@@ -67,6 +67,15 @@ class Hypothesis:
     rank: int
     supporting_evidence: list[str] = field(default_factory=list)
     contradicting_evidence: list[str] = field(default_factory=list)
+    categories: list[str] = field(default_factory=list)
+
+
+@dataclass
+class CategoryFinding:
+    category: str
+    status: Literal["completed", "abstained", "incomplete"]
+    summary: str
+    unresolved_questions: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -78,6 +87,7 @@ class RCAReport:
     unresolved_questions: list[str] = field(default_factory=list)
     tool_trace: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
+    category_findings: list[CategoryFinding] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

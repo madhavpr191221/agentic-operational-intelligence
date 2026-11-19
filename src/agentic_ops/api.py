@@ -27,6 +27,7 @@ class RunRequest(BaseModel):
 class InvestigationRequest(BaseModel):
     question: str = Field(min_length=3, max_length=1000)
     alert_evidence_id: str | None = None
+    alert_evidence_ids: list[str] | None = Field(default=None, min_length=1, max_length=4)
 
 
 def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
@@ -111,13 +112,15 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
     def list_alerts(run_id: str) -> list[dict]:
         if app.state.runtime.store.get_run(run_id) is None:
             raise HTTPException(status_code=404, detail="Unknown run")
-        return app.state.runtime.store.search_events(run_id, ("detector",), limit=200,
+        return app.state.runtime.store.search_events(run_id, ("detector",), limit=1000,
                                                      event_types=("anomaly_alert",))
 
     @app.post("/api/runs/{run_id}/investigations", status_code=202)
     def investigate(run_id: str, request: InvestigationRequest) -> dict:
         try:
-            return app.state.runtime.start_investigation(run_id, request.question, request.alert_evidence_id)
+            return app.state.runtime.start_investigation(
+                run_id, request.question, request.alert_evidence_id, request.alert_evidence_ids
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:

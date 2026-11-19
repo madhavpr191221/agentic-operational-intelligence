@@ -14,7 +14,7 @@ from agents import Agent, Runner, function_tool
 from agents.exceptions import MaxTurnsExceeded
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
-from agentic_ops.domain import EvidenceRef, Hypothesis, RCAReport
+from agentic_ops.domain import CATEGORIES, CategoryFinding, EvidenceRef, Hypothesis, RCAReport
 from agentic_ops.evidence import EvidenceTools
 
 ProgressCallback = Callable[[dict[str, Any]], Any] | None
@@ -54,6 +54,7 @@ class HypothesisNote(BaseModel):
     title: str
     explanation: str
     rank: int = Field(ge=1, le=3)
+    categories: list[str] = Field(min_length=1, max_length=len(CATEGORIES))
 
 
 class InvestigationNotes(BaseModel):
@@ -76,70 +77,79 @@ class MockInvestigator(Investigator):
     def investigate(self, run_id: str, question: str, evidence_tools: EvidenceTools,
                     alert_context: dict[str, Any] | None = None,
                     on_progress: ProgressCallback = None) -> RCAReport:
-        category = str((alert_context or {}).get("category", "payments"))
-        query = {"payments": "payment", "orders": "order", "account": "account",
-                 "delivery": "delivery"}.get(category, category)
-        service = "checkout-payments" if category == "payments" else "catalog-search"
-        searches = [
-            ("search_tickets", {"query": query, "limit": 12},
-             lambda: evidence_tools.search_tickets(run_id, query, 12)),
-            ("search_issues", {"query": query, "limit": 10},
-             lambda: evidence_tools.search_issues(run_id, query, 10)),
-            ("search_product_logs", {"query": service, "limit": 10},
-             lambda: evidence_tools.search_product_logs(run_id, service, 10)),
-            ("list_changes", {"service": service, "limit": 10},
-             lambda: evidence_tools.list_changes(run_id, service, 10)),
-        ]
-        outputs: list[tuple[str, Any]] = []
+        signals = _selected_signals(alert_context)
+        categories = [str(signal["category"]) for signal in signals] or ["payments"]
         trace: list[dict[str, Any]] = []
-        for name, arguments, invoke in searches:
-            if on_progress:
-                on_progress({"type": "tool_started", "stage": "gathering_evidence",
-                             "tool": name, "message": f"Searching {name.replace('_', ' ')}."})
-            result = invoke()
-            outputs.append((name, result))
-            trace.append({"tool": name, "arguments": arguments, "result": result})
-            if on_progress:
-                on_progress({"type": "tool_completed", "stage": "gathering_evidence",
-                             "tool": name, "message": _tool_summary(result)})
-
         evidence_by_id: dict[str, EvidenceRef] = {}
-        _collect_evidence_refs(outputs, evidence_by_id)
-        tickets = outputs[0][1].get("tickets", [])
-        issues = outputs[1][1].get("issues", [])
-        logs = outputs[2][1].get("logs", [])
-        changes = outputs[3][1].get("changes", [])
-        active_issue = next((item for item in reversed(issues)
-                             if item.get("payload", {}).get("status") == "open"), None)
-        failing_log = next((item for item in reversed(logs)
-                            if item.get("payload", {}).get("errors", 0) > 0), None)
-        matching_tickets = [item for item in tickets
-                            if item.get("payload", {}).get("category") == category]
+        findings: list[CategoryFinding] = []
+        hypotheses: list[Hypothesis] = []
+        category_queries = {"payments": ("payment", "checkout-payments"),
+                            "orders": ("order", "catalog-search"),
+                            "account": ("account", "catalog-search"),
+                            "delivery": ("delivery", "catalog-search")}
+        for category in categories:
+            query, service = category_queries[category]
+            category_outputs: dict[str, Any] = {}
+            searches = [
+                ("search_tickets", {"query": query, "limit": 12},
+                 lambda: evidence_tools.search_tickets(run_id, query, 12)),
+                ("search_issues", {"query": query, "limit": 10},
+                 lambda: evidence_tools.search_issues(run_id, query, 10)),
+                ("search_product_logs", {"query": service, "limit": 10},
+                 lambda: evidence_tools.search_product_logs(run_id, service, 10)),
+                ("list_changes", {"service": service, "limit": 10},
+                 lambda: evidence_tools.list_changes(run_id, service, 10)),
+            ]
+            for name, arguments, invoke in searches:
+                if on_progress:
+                    on_progress({"type": "tool_started", "stage": "gathering_evidence",
+                                 "tool": name, "message": f"Searching {name.replace('_', ' ')} for {category}."})
+                result = invoke()
+                category_outputs[name] = result
+                trace.append({"tool": name, "arguments": {**arguments, "category": category}, "result": result})
+                _collect_evidence_refs(result, evidence_by_id)
+                if on_progress:
+                    on_progress({"type": "tool_completed", "stage": "gathering_evidence",
+                                 "tool": name, "message": f"{category}: {_tool_summary(result)}"})
 
-        if category == "payments" and active_issue and failing_log and matching_tickets:
-            support = [active_issue["evidence_id"], failing_log["evidence_id"],
-                       matching_tickets[-1]["evidence_id"]]
-            if changes:
-                support.append(changes[-1]["evidence_id"])
-            hypotheses = [Hypothesis(
-                title="Unresolved payment authorization failure",
-                explanation="An open payment issue, payment-service errors, and payment-related tickets overlap in time. The evidence supports this as a plausible explanation for the category spike.",
-                rank=1, supporting_evidence=support,
-            )]
-            summary = "The available evidence supports an unresolved payment-service problem as a plausible explanation for the payment-ticket increase."
-            status = "completed"
-            unresolved = []
-        else:
-            hypotheses = []
-            summary = f"I could not establish a cause for the {category} ticket increase from the available synthetic evidence."
-            status = "abstained"
-            unresolved = [f"Which system event, if any, explains the {category} ticket increase?"]
+            tickets = category_outputs["search_tickets"].get("tickets", [])
+            issues = category_outputs["search_issues"].get("issues", [])
+            logs = category_outputs["search_product_logs"].get("logs", [])
+            changes = category_outputs["list_changes"].get("changes", [])
+            active_issue = next((item for item in reversed(issues)
+                                 if item.get("payload", {}).get("status") == "open"), None)
+            failing_log = next((item for item in reversed(logs)
+                                if item.get("payload", {}).get("errors", 0) > 0), None)
+            matching_tickets = [item for item in tickets
+                                if item.get("payload", {}).get("category") == category]
+            if category == "payments" and active_issue and failing_log and matching_tickets:
+                support = [active_issue["evidence_id"], failing_log["evidence_id"],
+                           matching_tickets[-1]["evidence_id"]]
+                if changes:
+                    support.append(changes[-1]["evidence_id"])
+                hypotheses.append(Hypothesis(
+                    title="Unresolved payment authorization failure",
+                    explanation="An open payment issue, payment-service errors, and payment-related tickets overlap in time. The evidence supports this as a plausible explanation for the category spike.",
+                    rank=1, supporting_evidence=support, categories=[category],
+                ))
+                findings.append(CategoryFinding(category, "completed",
+                    "Evidence supports an unresolved payment-service problem as a plausible explanation."))
+            else:
+                findings.append(CategoryFinding(category, "abstained",
+                    f"I could not establish a cause for the {category} ticket increase from the available synthetic evidence.",
+                    [f"Which system event, if any, explains the {category} ticket increase?"]))
+
+        complete_count = sum(item.status == "completed" for item in findings)
+        summary = (f"Evidence supports a cause for {complete_count} of {len(findings)} selected categories."
+                   if complete_count else "The available evidence did not establish a cause for the selected categories.")
         if on_progress:
             on_progress({"type": "report_ready", "stage": "report_ready",
                          "message": "Evidence-linked report is ready."})
-        return RCAReport(status=status, summary=summary, hypotheses=hypotheses,
-                         evidence=list(evidence_by_id.values()), unresolved_questions=unresolved,
-                         tool_trace=trace)
+        unresolved = [question for finding in findings for question in finding.unresolved_questions]
+        return RCAReport(status="completed" if hypotheses else "abstained", summary=summary,
+                         hypotheses=hypotheses, evidence=list(evidence_by_id.values()),
+                         unresolved_questions=unresolved, tool_trace=trace,
+                         category_findings=findings)
 
 
 class OpenAIInvestigator(Investigator):
@@ -147,7 +157,7 @@ class OpenAIInvestigator(Investigator):
 
     MAX_TURNS = 12
     MAX_TOOL_CALLS = 24
-    MAX_SEARCHES_PER_SOURCE = 3
+    MAX_SEARCHES_PER_SOURCE = len(CATEGORIES)
 
     def __init__(self, model: str | None = None):
         self.model = model or os.getenv("OPENAI_MODEL", "gpt-6.1-sol")
@@ -261,11 +271,13 @@ class OpenAIInvestigator(Investigator):
             model=self.model,
             instructions=(
                 "Investigate the selected synthetic operational signal using only the read-only evidence tools. "
-                "The signal already contains the detector outputs; do not recompute statistics. Interpret Z-score, "
+                "The selected_signals input contains the operator-selected category/window alerts. Investigate only "
+                "those selected categories and return candidate notes tagged with their categories. "
+                "The signals already contain the detector outputs; do not recompute statistics. Interpret Z-score, "
                 "CUSUM, and log-likelihood ratio as distinct detector evidence, not values to add together. "
                 "Start with focused searches across the most relevant sources. After seeing results, make a targeted "
-                "follow-up only to resolve a named uncertainty. Do not repeat broad searches; each source allows at "
-                "most three focused searches and identical queries reuse cached results. Stop once the evidence is "
+                "follow-up only to resolve a named uncertainty. Cover each selected category with focused searches; "
+                "each source allows at most one initial search per selected category and identical queries reuse cached results. Stop once the evidence is "
                 "sufficient to support or reject a cause. Search queries match record payload text: use one or two "
                 "keywords (for example, 'payment' or 'checkout-payments') and never put timestamps in the query; "
                 "timestamps are returned as record metadata. Return brief candidate explanations and uncertainties; "
@@ -280,7 +292,11 @@ class OpenAIInvestigator(Investigator):
             on_progress({"type": "status", "stage": "choosing_evidence",
                          "message": "Reviewing detector scores and selecting evidence searches."})
 
-        run_input = json.dumps({"operator_question": question, "selected_signal": alert_context}, ensure_ascii=False)
+        signals = _selected_signals(alert_context)
+        selected_categories = list(dict.fromkeys(str(signal.get("category")) for signal in signals
+                                                 if signal.get("category") in CATEGORIES)) or ["payments"]
+        run_input = json.dumps({"operator_question": question, "selected_signals": signals,
+                                "selected_categories": selected_categories}, ensure_ascii=False)
         try:
             streaming = Runner.run_streamed(agent, input=run_input, max_turns=self.MAX_TURNS)
             async for event in streaming.stream_events():
@@ -290,32 +306,41 @@ class OpenAIInvestigator(Investigator):
             notes = streaming.final_output
             if not isinstance(notes, InvestigationNotes):
                 raise ValueError("The investigator did not return structured investigation notes.")
-            return await self._compose_report(question, alert_context, notes, evidence_by_id,
+            return await self._compose_report(question, signals, selected_categories, notes, evidence_by_id,
                                               evidence_records, evidence_by_alias, trace,
                                               budget_reached, on_progress)
         except MaxTurnsExceeded:
             if on_progress:
                 on_progress({"type": "safety_ceiling", "stage": "partial",
                              "message": "Agent turn ceiling reached; returning gathered evidence as a partial investigation."})
+            findings = [CategoryFinding(category, "incomplete",
+                        "The investigator reached its turn ceiling before resolving this category.",
+                        ["What evidence would distinguish the remaining explanations?"])
+                        for category in selected_categories]
             return RCAReport(status="incomplete",
                              summary="The investigation reached its agent-turn safety ceiling before it could produce a complete report.",
                              hypotheses=[], evidence=list(evidence_by_id.values()),
                              unresolved_questions=["What explanation best fits the evidence collected so far?"],
-                             tool_trace=trace)
+                             tool_trace=trace, category_findings=findings)
 
-    async def _compose_report(self, question: str, alert_context: dict[str, Any] | None,
-                              notes: InvestigationNotes, evidence_by_id: dict[str, EvidenceRef],
+    async def _compose_report(self, question: str, signals: list[dict[str, Any]],
+                              selected_categories: list[str], notes: InvestigationNotes,
+                              evidence_by_id: dict[str, EvidenceRef],
                               evidence_records: dict[str, dict[str, Any]], aliases: dict[str, str],
                               trace: list[dict[str, Any]], budget_reached: bool,
                               on_progress: ProgressCallback) -> RCAReport:
         if not aliases:
-            return RCAReport(status="incomplete" if budget_reached else "abstained",
-                             summary="No evidence records were returned, so no cause can be supported.",
-                             hypotheses=[], evidence=[],
-                             unresolved_questions=notes.unresolved_questions or ["Which system record can explain the signal?"],
-                             tool_trace=trace)
+            status = "incomplete" if budget_reached else "abstained"
+            findings = [CategoryFinding(category, status,
+                        "No evidence records were returned, so no cause can be supported.",
+                        ["Which system record can explain this signal?"])
+                        for category in selected_categories]
+            return RCAReport(status=status, summary="No evidence records were returned, so no cause can be supported.",
+                             hypotheses=[], evidence=[], unresolved_questions=[
+                                 question for finding in findings for question in finding.unresolved_questions
+                             ], tool_trace=trace, category_findings=findings)
 
-        report_type = _constrained_report_type(list(aliases))
+        report_type = _constrained_report_type(list(aliases), selected_categories)
         citation_ids_by_evidence = {evidence_id: citation_id
                                     for citation_id, evidence_id in aliases.items()}
         evidence_index = []
@@ -339,17 +364,19 @@ class OpenAIInvestigator(Investigator):
         composer = Agent(
             name="RCA Report Composer", model=self.model,
             instructions=(
-                "Produce the final evidence-grounded RCA. Reassess the investigator's candidate notes against the "
-                "actual records; do not repeat unsupported claims. Only cite citation_id values present in the "
-                "evidence index. Structured output restricts citations to those values. Rank plausible causes, "
-                "include contradictory evidence when present, and abstain when support is weak. Describe the cause "
-                "as evidence-supported or consistent with the records, never as proven causality."
+                "Produce an evidence-grounded finding for every selected category. Reassess candidate notes against "
+                "the records; do not repeat unsupported claims. Only cite handles in the evidence index. Include "
+                "contradictions when present and abstain per category when support is weak. Put a hypothesis in "
+                "shared_hypotheses only when the same cause is independently supported for at least two selected "
+                "categories. For every named category, provide a category_support entry with evidence tied to that "
+                "category. Describe explanations as evidence-supported, never proven causality."
             ),
             output_type=report_type,
         )
         result = await Runner.run(
             composer,
-            input=json.dumps({"operator_question": question, "selected_signal": alert_context,
+            input=json.dumps({"operator_question": question, "selected_signals": signals,
+                              "selected_categories": selected_categories,
                               "candidate_notes": notes.model_dump(), "evidence_index": evidence_index},
                              ensure_ascii=False),
             max_turns=2,
@@ -357,49 +384,122 @@ class OpenAIInvestigator(Investigator):
         content = result.final_output
         if not isinstance(content, report_type):
             raise ValueError("The report composer did not return the constrained RCA schema.")
+
         valid_ids = set(evidence_by_id)
-        hypotheses = []
+        hypotheses: list[Hypothesis] = []
         for item in content.hypotheses:
             supporting = [_resolve_citation(value, valid_ids, aliases) for value in item.supporting_evidence]
             contradicting = [_resolve_citation(value, valid_ids, aliases) for value in item.contradicting_evidence]
             supporting = [value for value in supporting if value]
             contradicting = [value for value in contradicting if value]
-            if supporting:
-                hypotheses.append(Hypothesis(item.title, item.explanation, item.rank, supporting, contradicting))
-        if hypotheses:
-            status = "incomplete" if budget_reached else "completed"
-            summary = content.summary
-            if budget_reached:
-                summary = "Evidence search reached its safety ceiling; this investigation is partial. " + summary
-            unresolved = content.unresolved_questions
-        else:
-            status = "incomplete" if budget_reached else "abstained"
-            summary = "No cause is assigned because the available evidence did not support a cited hypothesis."
+            if supporting and item.category in selected_categories:
+                hypotheses.append(Hypothesis(item.title, item.explanation, item.rank, supporting,
+                                             contradicting, [item.category]))
+        for item in content.shared_hypotheses:
+            contradicting = [_resolve_citation(value, valid_ids, aliases) for value in item.contradicting_evidence]
+            contradicting = [value for value in contradicting if value]
+            categories = list(dict.fromkeys(value for value in item.categories if value in selected_categories))
+            support_by_category = {
+                entry.category: [resolved for value in entry.supporting_evidence
+                                 if (resolved := _resolve_citation(value, valid_ids, aliases))
+                                 and evidence_records.get(resolved, {}).get("payload", {}).get("category") == entry.category]
+                for entry in item.category_support
+            }
+            if (len(categories) > 1 and set(support_by_category) >= set(categories)
+                    and all(support_by_category.get(category) for category in categories)):
+                supporting = list(dict.fromkeys(value for category in categories
+                                                for value in support_by_category[category]))
+                hypotheses.append(Hypothesis(item.title, item.explanation, item.rank, supporting,
+                                             contradicting, categories))
+
+        findings_by_category = {item.category: item for item in content.category_findings}
+        category_findings: list[CategoryFinding] = []
+        unresolved: list[str] = []
+        for category in selected_categories:
+            finding = findings_by_category.get(category)
+            has_supported_hypothesis = any(category in item.categories for item in hypotheses)
+            status = ("completed" if has_supported_hypothesis else
+                      "incomplete" if budget_reached else "abstained")
+            questions = (finding.unresolved_questions if finding and status != "completed" else [])
+            category_findings.append(CategoryFinding(
+                category, status,
+                finding.summary if finding and has_supported_hypothesis else
+                "Evidence supports this category as part of a shared cause." if has_supported_hypothesis else
+                "No cited evidence supports a cause for this category.",
+                questions,
+            ))
+            unresolved.extend(questions)
+
+        completed_count = sum(item.status == "completed" for item in category_findings)
+        status = "incomplete" if budget_reached else "completed" if completed_count else "abstained"
+        summary = content.summary if completed_count else "No cause is assigned because the available evidence did not support a cited hypothesis."
+        if budget_reached:
+            summary = "Evidence search reached its safety ceiling; this investigation is partial. " + summary
+        if not unresolved:
             unresolved = content.unresolved_questions or notes.unresolved_questions
         return RCAReport(status=status, summary=summary, hypotheses=hypotheses,
                          evidence=list(evidence_by_id.values()), unresolved_questions=unresolved,
-                         tool_trace=trace)
+                         tool_trace=trace, category_findings=category_findings)
 
 
-def _constrained_report_type(citation_ids: list[str]) -> type[BaseModel]:
-    """Build a report schema whose citation fields accept only returned evidence handles."""
+def _constrained_report_type(citation_ids: list[str], categories: list[str]) -> type[BaseModel]:
+    """Build a report schema constrained to selected categories and returned evidence handles."""
     citation_type = Literal.__getitem__(tuple(citation_ids))
+    category_type = Literal.__getitem__(tuple(categories))
     cited_hypothesis = create_model(
-        "CitedHypothesis",
+        "CitedCategoryHypothesis",
         __config__=ConfigDict(extra="forbid"),
         title=(str, ...),
         explanation=(str, ...),
         rank=(int, Field(ge=1, le=3)),
+        category=(category_type, ...),
         supporting_evidence=(list[citation_type], ...),
         contradicting_evidence=(list[citation_type], ...),
+    )
+    category_support = create_model(
+        "SharedCauseCategorySupport",
+        __config__=ConfigDict(extra="forbid"),
+        category=(category_type, ...),
+        supporting_evidence=(list[citation_type], Field(min_length=1)),
+    )
+    shared_hypothesis = create_model(
+        "CitedSharedHypothesis",
+        __config__=ConfigDict(extra="forbid"),
+        title=(str, ...),
+        explanation=(str, ...),
+        rank=(int, Field(ge=1, le=3)),
+        categories=(list[category_type], Field(min_length=min(2, len(categories)), max_length=len(categories))),
+        category_support=(list[category_support], Field(min_length=min(2, len(categories)), max_length=len(categories))),
+        contradicting_evidence=(list[citation_type], ...),
+    )
+    category_finding = create_model(
+        "CategoryFindingOutput",
+        __config__=ConfigDict(extra="forbid"),
+        category=(category_type, ...),
+        status=(Literal["completed", "abstained"], ...),
+        summary=(str, ...),
+        unresolved_questions=(list[str], ...),
     )
     return create_model(
         "CitedRCAOutput",
         __config__=ConfigDict(extra="forbid"),
         summary=(str, ...),
+        category_findings=(list[category_finding], ...),
         hypotheses=(list[cited_hypothesis], ...),
+        shared_hypotheses=(list[shared_hypothesis], ...),
         unresolved_questions=(list[str], ...),
     )
+
+
+def _selected_signals(alert_context: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(alert_context, dict):
+        return []
+    signals = alert_context.get("selected_signals")
+    if isinstance(signals, list):
+        return [signal for signal in signals if isinstance(signal, dict)]
+    if alert_context.get("category") in CATEGORIES:
+        return [alert_context]
+    return []
 
 
 def _collect_evidence_records(value: Any, target: dict[str, dict[str, Any]]) -> None:

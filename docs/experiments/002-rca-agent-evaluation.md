@@ -24,3 +24,14 @@ First inspect saved tool traces for missed evidence, repeated searches, and unsu
 ## Demo acceptance
 
 From the browser, start the seeded payment scenario, select the payments alert, and run an investigation. The UI must show the detector context, ordered tool starts/results, and a final hypothesis whose citations resolve to the displayed evidence. Repeat with mock mode to demonstrate the same UI offline. Healthy and resolved controls should not be described as proven payment causes.
+
+## Multi-Category Regressions
+
+Select only categories with alert episodes and score each category finding independently. Include a mixed case where one category is supported and another must abstain. A shared-cause claim is supported only when separate evidence backs every named category. Keep episode grouping and representative-window selection deterministic for ties.
+
+Add these measures:
+
+- **Category isolation:** unselected categories must not appear in investigator inputs, findings, or hypotheses.
+- **Multi-category precision:** score supported and unsupported findings per selected category; score shared-cause claims separately against evidence from each named category.
+
+For the browser demo, compare all four independently scaled charts, select an episode and representative alert window, then investigate. Verify detector context, ordered tool activity, and per-category citations. When multiple episodes are available, check that each selected category receives its own finding and that shared causes require evidence across categories.

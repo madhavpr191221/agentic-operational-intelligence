@@ -50,6 +50,18 @@ class RuntimeTests(unittest.TestCase):
         cited = set(report["hypotheses"][0]["supporting_evidence"])
         self.assertTrue(cited)
         self.assertTrue(cited.issubset(evidence_ids))
+        self.assertEqual([finding["category"] for finding in report["category_findings"]], ["payments"])
+
+    def test_investigation_rejects_duplicate_categories(self):
+        config = SimulationConfig(seed=4, window_count=52, calibration_windows=20,
+                                  tick_delay_seconds=0.0, baseline_tickets_per_window=3.0)
+        run = self.runtime.start_run(config)
+        self.runtime.wait_for_run(run["run_id"], timeout=20)
+        alerts = self.runtime.store.search_events(run["run_id"], ("detector",), event_types=("anomaly_alert",))
+        alert, earlier_alert = alerts[-1], alerts[-2]
+        with self.assertRaisesRegex(ValueError, "one alert episode per category"):
+            self.runtime.start_investigation(run["run_id"], "Compare these signals",
+                                             alert_evidence_ids=[alert["evidence_id"], earlier_alert["evidence_id"]])
 
 
 if __name__ == "__main__":

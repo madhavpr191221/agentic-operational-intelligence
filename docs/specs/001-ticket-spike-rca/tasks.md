@@ -38,3 +38,12 @@
 - [x] Persist tool lifecycle progress and display it in the incident room.
 - [x] Define synthetic RCA evaluation cases and add a live evaluation command.
 - [ ] Run the backend suite, frontend build, detector evaluation, and a small live/mock browser walkthrough before release.
+
+## Stage G - Category Comparison and Multi-Category RCA
+
+- [x] Replace the combined category curve with four small-multiple charts using independent scales.
+- [x] Group consecutive alerts into category episodes, select a representative alert window, and allow one selected episode per category.
+- [x] Extend the investigation API with a bounded multi-alert request while preserving single-alert compatibility.
+- [x] Return category-level findings and keep cross-category cause hypotheses separate and evidence-gated.
+- [x] Update the product spec and evaluation design for category-specific selection and review.
+- [ ] Run backend checks and frontend build; review episode selection and category reports in the browser.
