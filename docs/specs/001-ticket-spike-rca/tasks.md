@@ -47,3 +47,13 @@
 - [x] Return category-level findings and keep cross-category cause hypotheses separate and evidence-gated.
 - [x] Update the product spec and evaluation design for category-specific selection and review.
 - [ ] Run backend checks and frontend build; review episode selection and category reports in the browser.
+
+## Stage H - Message-Level Investigation and Practical RCA Analysis
+
+- [x] Generate one reproducible synthetic message body and observable reason per ticket without changing detector count inputs.
+- [x] Add read-only category comparison, reason/channel contribution, timeline, and before/after analysis tools.
+- [x] Add evidence-grounded, non-executing runbook recommendations with verification steps.
+- [x] Show customer message text, cited evidence records, and suggested actions in the incident room.
+- [x] Extend the RCA evaluation report for analytical-tool coverage and recommendation grounding; add deterministic regression coverage without launching a multi-seed paid evaluation.
+- [x] Run the backend suite, frontend build, and held-out detector evaluation.
+- [ ] Inspect the live investigation UI in a browser; browser automation was unavailable during this implementation pass.

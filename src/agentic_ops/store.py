@@ -130,7 +130,8 @@ class EventStore:
         return [self._event(row) for row in rows]
 
     def search_events(self, run_id: str, sources: tuple[str, ...], query: str = "", limit: int = 30,
-                      event_types: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+                      event_types: tuple[str, ...] = (), start_at: str | None = None,
+                      end_at: str | None = None) -> list[dict[str, Any]]:
         if not sources:
             return []
         source_slots = ",".join("?" for _ in sources)
@@ -140,6 +141,12 @@ class EventStore:
             type_slots = ",".join("?" for _ in event_types)
             sql += f" AND event_type IN ({type_slots})"
             params.extend(event_types)
+        if start_at is not None:
+            sql += " AND simulated_at>=?"
+            params.append(start_at)
+        if end_at is not None:
+            sql += " AND simulated_at<=?"
+            params.append(end_at)
         sql += " ORDER BY sequence DESC LIMIT ?"
         params.append(min(max(limit * 8, 1), 1000))
         with self._connection() as connection:
@@ -150,6 +157,19 @@ class EventStore:
             records = [record for record in records if all(term in json.dumps(record["payload"]).casefold()
                                                             for term in terms)]
         return list(reversed(records[-limit:]))
+
+    def get_events_by_evidence_ids(self, run_id: str, evidence_ids: list[str]) -> list[dict[str, Any]]:
+        """Resolve a small caller-supplied citation set within one run only."""
+        ids = list(dict.fromkeys(evidence_ids))[:20]
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM events WHERE run_id=? AND evidence_id IN ({placeholders}) ORDER BY sequence",
+                (run_id, *ids),
+            ).fetchall()
+        return [self._event(row) for row in rows]
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self._connection() as connection:

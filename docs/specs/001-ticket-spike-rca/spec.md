@@ -8,6 +8,8 @@ An operator sees an unusual ticket-volume increase and needs a fast, evidence-ba
 
 The local application streams a reproducible fictional scenario. Ticket arrivals are stochastic. Independent category detectors evaluate each 30-minute window and emit a structured alert containing its category, metric, time window, observed/baseline counts, and detector scores. The incident room shows one independently scaled chart per category and groups consecutive alert windows into category-specific episodes. Operators can select up to one episode per category and choose the exact alert window used as its representative signal. After the operator asks a question, a single tool-using investigator queries synthetic support tickets, issue records, product logs, and change events for the selected categories. The final report gives a finding for each selected category, ranks cited hypotheses, and only presents a shared cause when evidence supports it across categories.
 
+Each incoming email/chat/comment represented in this simulator is one ticket and contains one synthetic customer message. The message body, reason label, channel, category, and timestamp are attributes of that same ticket record; they are not additional events to add to the ticket count. Customers who do not contact support do not appear in the ticket stream, so ticket volume measures support demand rather than overall customer satisfaction.
+
 ## Initial Scenario
 
 Runs span 72 simulated hours. The first 24 hours establish a normal baseline. A fictional payment issue opens 48 hours before the run ends and remains unresolved. Payment failures worsen near the end; customer tickets arise randomly with a probability linked to failed payments. Additional scenarios include healthy operation, an unrelated open issue, and a resolved payment issue.
@@ -18,6 +20,9 @@ Runs span 72 simulated hours. The first 24 hours establish a normal baseline. A 
 - Event stream: timestamped generated events and detector alerts.
 - Investigator: one or more operator-selected category alert episodes and a question; category findings, structured ranked hypotheses, and evidence references. The UI shows persisted tool activity while the run is in progress.
 - Read-only tools: ticket search, issue search, product-log search, and change listing. Detector output is passed directly in the selected signal context rather than recalculated by the agent.
+- Deterministic evidence analysis: compare selected categories with their expected counts, rank ticket reasons/channels against preceding windows, build a timestamp-sorted incident timeline, and compare ticket/service-error rates before and during the alert window. Analysis reports the records used and marks missing data explicitly.
+- Fictional runbook lookup: return advisory next steps with evidence references and a verification check. Recommendations never execute changes; insufficient evidence yields a request to collect specific records.
+- Customer messages are visible in the ticket feed and in the investigation evidence review so operators can inspect cited text.
 
 ## Statistical Behavior
 
@@ -33,6 +38,7 @@ Runs span 72 simulated hours. The first 24 hours establish a normal baseline. A 
 - No external ticketing or production-system integrations.
 - The simulator's planted-cause labels are evaluator-only.
 - The agent does not calculate statistics or write/change synthetic records.
+- The agent may call deterministic, read-only tools to analyze the existing statistical signal and observable records. It does not have a remediation execution tool.
 - CSAT, escalation, and other metric anomaly detection are out of the first milestone.
 
 ## Acceptance Criteria

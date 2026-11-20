@@ -18,6 +18,154 @@ type Run = {
   error?: string | null
 }
 
+type EvidenceItem = { evidence_id: string; source: string; observed_at: string; summary: string; window_index?: number | null }
+type FocusWindow = {
+  window_index: number
+  available?: boolean
+  start_at?: string | null
+  end_at?: string | null
+  tickets: number | null
+  expected: number | null
+  alerting: boolean
+  is_focus: boolean
+  service_errors: number | null
+  service_requests: number | null
+  service_error_rate: number | null
+}
+type EpisodeSummary = {
+  category: string
+  start_window_index: number
+  end_window_index: number
+  focus_window_index: number
+  alert_window_count: number
+  duration_minutes: number
+  total_tickets: number
+  expected_total: number
+  expected_window_coverage: number
+  average_tickets_per_window: number
+  baseline: { window_count: number; expected_window_count: number; total_tickets: number; average_tickets_per_window: number | null; missing_windows: boolean }
+  service_errors: { episode: { errors: number; requests: number; error_rate: number | null }; baseline: { errors: number; requests: number; error_rate: number | null } }
+  strongest_window: { window_index: number; tickets: number; severity_ratio: number }
+  focus: { start_window_index: number; end_window_index: number; start_at?: string; end_at?: string; available_windows: number; requested_windows: number; total_tickets?: number; expected_total?: number; expected_window_coverage?: number; service_errors: { errors: number; requests: number; error_rate: number | null }; window_series?: FocusWindow[] }
+}
+
+const evidenceSourceLabels: Record<string, string> = {
+  detector: 'Detector alert',
+  support_tickets: 'Customer ticket',
+  product_logs: 'Service log',
+  issue_tracker: 'Tracked issue',
+  change_log: 'Change record',
+}
+
+const evidenceSourceDescriptions: Record<string, string> = {
+  detector: 'Statistical result for the selected ticket-count window.',
+  support_tickets: 'A synthetic customer message counted as one support ticket.',
+  product_logs: 'A synthetic product or service event, such as an error.',
+  issue_tracker: 'A fictional incident record and its current status.',
+  change_log: 'A fictional deployment or configuration change record.',
+}
+
+const investigationToolLabels: Record<string, string> = {
+  search_tickets: 'Review customer tickets',
+  search_issues: 'Check tracked issues',
+  search_product_logs: 'Review service logs',
+  list_changes: 'Check recent changes',
+  compare_categories: 'Compare categories',
+  rank_ticket_contributors: 'Rank ticket reasons',
+  build_incident_timeline: 'Build event timeline',
+  compare_before_after: 'Compare before and after',
+  analyze_focus_window: 'Analyze selected-window group',
+  suggest_runbook_actions: 'Review suggested actions',
+}
+
+function EvidenceCitation({ item, id, contradiction = false }: { item?: EvidenceItem; id: string; contradiction?: boolean }) {
+  const label = item ? evidenceSourceLabels[item.source] ?? 'Evidence record' : 'Evidence record unavailable'
+  return (
+    <details className="citation-detail">
+      <summary className={`citation${contradiction ? ' contradiction' : ''}`} aria-label={`View ${label}${item ? ` from ${timeLabel(item.observed_at)}` : ''}`}>{contradiction ? `Contrary evidence · ${label}` : label}{item ? ` · ${timeLabel(item.observed_at)}` : ''}</summary>
+      <div className="citation-preview">
+        <strong>{label}</strong>
+        {item && <><small>{evidenceSourceDescriptions[item.source] ?? 'Evidence used in this investigation.'}</small><time>{timeLabel(item.observed_at)}</time><p>{item.summary}</p></>}
+        <details className="technical-details"><summary>Technical details</summary><code>{id}</code></details>
+      </div>
+    </details>
+  )
+}
+
+function EvidenceList({ ids, evidenceMap, contradiction = false }: { ids: string[]; evidenceMap: Map<string, EvidenceItem>; contradiction?: boolean }) {
+  const visible = ids.slice(0, 3)
+  const remaining = ids.slice(3)
+  if (!ids.length) return null
+  return <>
+    <div className="citation-list">{visible.map((id) => <EvidenceCitation key={id} id={id} item={evidenceMap.get(id)} contradiction={contradiction} />)}</div>
+    {remaining.length > 0 && <details className="more-evidence"><summary>{`View ${remaining.length} more ${contradiction ? 'contrary ' : ''}evidence ${remaining.length === 1 ? 'record' : 'records'}`}</summary><div className="citation-list">{remaining.map((id) => <EvidenceCitation key={id} id={id} item={evidenceMap.get(id)} contradiction={contradiction} />)}</div></details>}
+  </>
+}
+
+function exactTimestamp(value: string) {
+  return `${new Date(value).toLocaleString('en-GB', {
+    timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  })} UTC`
+}
+
+function isEvidenceInFocus(item: EvidenceItem | undefined, focusSummaries: EpisodeSummary[]) {
+  if (!item) return false
+  const focused = new Set(focusSummaries.flatMap((summary) =>
+    (summary.focus.window_series ?? []).filter((window) => window.available).map((window) => window.window_index)))
+  if (item.window_index !== undefined && item.window_index !== null) return focused.has(item.window_index)
+  const timestamp = Date.parse(item.observed_at)
+  return focusSummaries.some((summary) => (summary.focus.window_series ?? []).some((window) =>
+    window.available && window.start_at && window.end_at
+    && timestamp >= Date.parse(window.start_at) && timestamp < Date.parse(window.end_at)))
+}
+
+function ScopedEvidenceList({ ids, evidenceMap, focusSummaries, contradiction = false }: {
+  ids: string[]
+  evidenceMap: Map<string, EvidenceItem>
+  focusSummaries: EpisodeSummary[]
+  contradiction?: boolean
+}) {
+  const scopeLabel = focusSummaries.length === 1
+    ? `${focusSummaries[0].focus.available_windows}-window focus group`
+    : 'selected focus groups'
+  const inFocus: string[] = []
+  const contextual: string[] = []
+  for (const id of ids) {
+    const item = evidenceMap.get(id)
+    if (isEvidenceInFocus(item, focusSummaries)) inFocus.push(id)
+    else contextual.push(id)
+  }
+  return <div className="scoped-evidence">
+    <div className="report-evidence-group"><span>Evidence within the {scopeLabel}</span>
+      {inFocus.length ? <EvidenceList ids={inFocus} evidenceMap={evidenceMap} contradiction={contradiction} /> : <small>No cited records fall within this focus group.</small>}
+    </div>
+    {contextual.length > 0 && <div className="report-evidence-group context-evidence"><span>Additional context outside the {scopeLabel}</span><EvidenceList ids={contextual} evidenceMap={evidenceMap} contradiction={contradiction} /></div>}
+  </div>
+}
+
+function FocusWindowTable({ summary }: { summary?: EpisodeSummary }) {
+  if (!summary?.focus.window_series?.length) return null
+  const focus = summary.focus
+  const focusWindows = focus.window_series ?? []
+  const availableCount = focusWindows.filter((window) => window.available).length
+  const errorRate = focus.service_errors.error_rate
+  return <section className="focus-window-section" aria-label={`Focus group analysis for ${summary.category}`}>
+    <div className="focus-window-heading"><div><strong>Focus group · {availableCount} {availableCount === 1 ? 'window' : 'windows'}</strong><small>Shown oldest to newest. The selected window is highlighted. Times are UTC; each interval includes its start and excludes its end.</small></div><span>W{focus.start_window_index}–W{focus.end_window_index}</span></div>
+    <div className="focus-window-table-wrap"><table className="focus-window-table">
+      <thead><tr><th>Window</th><th>Exact UTC interval</th><th>Tickets (observed / expected)</th><th>Service errors</th><th>Detector</th></tr></thead>
+      <tbody>{focusWindows.map((window) => <tr className={`${window.is_focus ? 'is-focus ' : ''}${window.available ? '' : 'is-unavailable'}`} key={window.window_index}>
+        <th scope="row">W{window.window_index}{window.is_focus && <span className="focus-window-tag">Selected</span>}</th>
+        <td>{window.available && window.start_at && window.end_at ? <>{exactTimestamp(window.start_at)} – {exactTimestamp(window.end_at)}</> : 'Window data unavailable'}</td>
+        <td>{window.available ? `${window.tickets} / ${window.expected == null ? 'expected unavailable' : window.expected.toFixed(1)}` : '—'}</td>
+        <td>{!window.available ? '—' : window.service_requests ? `${window.service_errors} / ${window.service_requests} (${((window.service_error_rate ?? 0) * 100).toFixed(1)}%)` : 'No log sample'}</td>
+        <td>{!window.available ? 'Unavailable' : window.alerting ? 'Alert' : 'No alert'}</td>
+      </tr>)}</tbody>
+    </table></div>
+    <div className="focus-window-total"><strong>Across available windows:</strong> {focus.total_tickets ?? '—'} tickets / {Number(focus.expected_total ?? 0).toFixed(1)} expected ({focus.expected_window_coverage ?? 0}/{focus.available_windows} expected values) · {focus.service_errors.errors} service errors / {focus.service_errors.requests} requests{errorRate === null ? '' : ` (${(errorRate * 100).toFixed(1)}%)`}</div>
+  </section>
+}
+
 type Investigation = {
   investigation_id: string
   status: string
@@ -32,6 +180,7 @@ type Investigation = {
   report?: {
     status: string
     summary: string
+    episode_summaries?: EpisodeSummary[]
     hypotheses: Array<{
       rank: number
       title: string
@@ -46,9 +195,17 @@ type Investigation = {
       summary: string
       unresolved_questions: string[]
     }>
-    evidence: Array<{ evidence_id: string; source: string; observed_at: string; summary: string }>
+    evidence: EvidenceItem[]
     unresolved_questions: string[]
     tool_trace: Array<{ tool: string; arguments?: Record<string, unknown>; result?: unknown }>
+    recommendations?: Array<{
+      category: string
+      runbook_id: string | null
+      title: string
+      next_step: string
+      verification: string
+      supporting_evidence: string[]
+    }>
   } | null
   error?: string | null
 }
@@ -72,16 +229,28 @@ type AlertEpisode = {
 }
 
 function timeLabel(value: string) {
-  return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return new Date(value).toLocaleTimeString('en-GB', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'UTC',
+    timeZoneName: 'short',
+  })
 }
 
-function CountChart({ points, alertWindows, compact = false }: {
+function CountChart({ points, alertWindows, compact = false, centerWindow, selectedWindow }: {
   points: Array<{ index: number; count: number }>
   alertWindows: Set<number>
   compact?: boolean
+  centerWindow?: number
+  selectedWindow?: number
 }) {
   const gradientId = useId().replaceAll(':', '')
-  const recent = points.slice(-54)
+  const windowSize = 54
+  const centerIndex = centerWindow === undefined ? -1 : points.findIndex((point) => point.index === centerWindow)
+  const startIndex = centerIndex < 0
+    ? Math.max(0, points.length - windowSize)
+    : Math.max(0, Math.min(points.length - windowSize, centerIndex - Math.floor(windowSize / 2)))
+  const recent = points.slice(startIndex, startIndex + windowSize)
   const max = Math.max(8, ...recent.map((point) => point.count))
   const width = 760
   const height = 176
@@ -91,10 +260,11 @@ function CountChart({ points, alertWindows, compact = false }: {
     return `${x},${y}`
   }).join(' ')
   const last = recent.at(-1)
+  const isCurrentRange = recent.at(-1)?.index === points.at(-1)?.index
   return (
     <div className="chart-wrap">
       <div className="chart-scale"><span>{max}</span><span>{Math.round(max / 2)}</span><span>0</span></div>
-        <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label="Ticket counts by 30-minute window">
+        <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={`Ticket counts by 30-minute window${selectedWindow === undefined ? '' : `; selected alert at window ${selectedWindow}`}`}>
         <defs>
           <linearGradient id={`areaFill-${gradientId}`} x1="0" x2="0" y1="0" y2="1">
             <stop offset="0%" stopColor="var(--mint)" stopOpacity=".25" />
@@ -106,10 +276,11 @@ function CountChart({ points, alertWindows, compact = false }: {
         {recent.length > 1 && <polyline points={coordinates} className="chart-line" />}
         {recent.map((point, index) => alertWindows.has(point.index) && <circle
           key={point.index} cx={recent.length <= 1 ? width : (index / (recent.length - 1)) * width}
-          cy={height - (point.count / max) * (height - 16) - 4} r={compact ? 3 : 4} className="chart-alert-dot" />)}
-        {last && <circle cx={width} cy={height - (last.count / max) * (height - 16) - 4} r="4" className="chart-dot" />}
+          cy={height - (point.count / max) * (height - 16) - 4} r={point.index === selectedWindow ? 6 : compact ? 3 : 4}
+          className={`chart-alert-dot${point.index === selectedWindow ? ' selected' : ''}`} />)}
+        {last && isCurrentRange && <circle cx={width} cy={height - (last.count / max) * (height - 16) - 4} r="4" className="chart-dot" />}
       </svg>
-      <div className="chart-axis"><span>Earlier</span><span>Each point = 30 simulated minutes</span><span>Now</span></div>
+      <div className="chart-axis"><span>Earlier</span><span>Each point = 30 simulated minutes</span><span>{isCurrentRange ? 'Now' : 'Later'}</span></div>
     </div>
   )
 }
@@ -187,7 +358,48 @@ function App() {
     return response.json() as Promise<T>
   }, [])
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const runId = params.get('run')
+    const investigationId = params.get('investigation')
+    if (!runId || !investigationId) return
+    let active = true
+    setBusy(true)
+    Promise.all([
+      request<Run>(`/api/runs/${encodeURIComponent(runId)}`),
+      request<Investigation>(`/api/runs/${encodeURIComponent(runId)}/investigations/${encodeURIComponent(investigationId)}`),
+      request<EventRecord[]>(`/api/runs/${encodeURIComponent(runId)}/alerts`),
+    ]).then(([savedRun, savedInvestigation, savedAlerts]) => {
+      if (!active) return
+      const summaries = savedInvestigation.report?.episode_summaries ?? []
+      const selected = summaries.flatMap((summary) => {
+        const alert = savedAlerts.find((item) => item.payload.category === summary.category
+          && Number(item.payload.window_index) === summary.focus_window_index)
+        return alert ? [alert.evidence_id] : []
+      })
+      setScenario(savedRun.scenario)
+      setSeed(savedRun.seed)
+      setArrivalModel(savedRun.arrival_model)
+      setSelectedAlertIds(selected)
+      setSelectionTouched(selected.length > 0)
+      setRun(savedRun)
+      setInvestigation(savedInvestigation)
+    }).catch((issue) => {
+      if (active) setError(issue instanceof Error ? issue.message : 'Could not open the saved investigation.')
+    }).finally(() => { if (active) setBusy(false) })
+    return () => { active = false }
+  }, [request])
+
+  useEffect(() => {
+    if (!investigation?.report || window.location.hash !== '#investigation-report') return
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById('investigation-report')?.scrollIntoView({ block: 'start' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [investigation?.investigation_id, investigation?.status])
+
   const startRun = async () => {
+    window.history.replaceState(null, '', window.location.pathname)
     setError('')
     setBusy(true)
     setEvents([])
@@ -261,7 +473,7 @@ function App() {
   const selectedEpisodes = alertEpisodes.filter((episode) => effectiveSelectedAlertIds.some((id) => episode.alerts.some((alert) => alert.evidence_id === id)))
   const selectedAlert = selectedEpisodes.find((episode) => episode.category === focusedCategory)?.alerts.find((alert) => effectiveSelectedAlertIds.includes(alert.evidence_id))
     ?? selectedEpisodes[0]?.alerts.find((alert) => effectiveSelectedAlertIds.includes(alert.evidence_id))
-    ?? defaultEpisode?.peakAlert
+    ?? (!selectionTouched ? defaultEpisode?.peakAlert : undefined)
   const latestCount = observations.at(-1)?.payload.ticket_count as number | undefined ?? 0
   const baseline = observations.slice(0, Math.min(48, observations.length)).reduce((sum, event) => sum + Number(event.payload.ticket_count ?? 0), 0) /
     Math.max(1, Math.min(48, observations.length))
@@ -285,9 +497,23 @@ function App() {
     setError('')
     setInvestigation(null)
     try {
-      const started = await request<Investigation>(`/api/runs/${run.run_id}/investigations`, {
-        method: 'POST', body: JSON.stringify({ question, alert_evidence_ids: effectiveSelectedAlertIds }),
+      const episodeSelections = alertEpisodes.flatMap((episode) => {
+        const focusAlert = episode.alerts.find((alert) => effectiveSelectedAlertIds.includes(alert.evidence_id))
+        return focusAlert ? [{
+          category: episode.category,
+          start_window_index: Number(episode.alerts[0].payload.window_index),
+          end_window_index: Number(episode.alerts.at(-1)?.payload.window_index),
+          focus_window_index: Number(focusAlert.payload.window_index),
+        }] : []
       })
+      const started = await request<Investigation>(`/api/runs/${run.run_id}/investigations`, {
+        method: 'POST', body: JSON.stringify({ question, episode_selections: episodeSelections }),
+      })
+      const reportUrl = new URL(window.location.href)
+      reportUrl.searchParams.set('run', run.run_id)
+      reportUrl.searchParams.set('investigation', started.investigation_id)
+      reportUrl.hash = 'investigation-report'
+      window.history.replaceState(null, '', reportUrl)
       setInvestigation(started)
     } catch (issue) {
       setError(issue instanceof Error ? issue.message : 'Could not start investigation.')
@@ -295,6 +521,7 @@ function App() {
   }
 
   const toggleEpisode = (episode: AlertEpisode) => {
+    setInvestigation(null)
     setSelectionTouched(true)
     setFocusedCategory(episode.category)
     setSelectedAlertIds((current) => {
@@ -307,6 +534,7 @@ function App() {
   }
 
   const chooseEpisodeWindow = (episode: AlertEpisode, evidenceId: string) => {
+    setInvestigation(null)
     setSelectionTouched(true)
     setFocusedCategory(episode.category)
     setSelectedAlertIds((current) => {
@@ -328,14 +556,38 @@ function App() {
     return () => window.clearInterval(timer)
   }, [run?.run_id, investigation?.investigation_id, investigation?.status, request])
 
+  useEffect(() => {
+    if (!run || !investigation || !investigation.report || investigation.report.episode_summaries?.length) return
+    let active = true
+    request<Investigation>(`/api/runs/${run.run_id}/investigations/${investigation.investigation_id}`)
+      .then((fresh) => {
+        if (active && fresh.report?.episode_summaries?.length) setInvestigation(fresh)
+      })
+      .catch(() => undefined)
+    return () => { active = false }
+  }, [run?.run_id, investigation?.investigation_id, investigation?.report?.episode_summaries?.length, request])
+
   const evidenceMap = new Map((investigation?.report?.evidence ?? []).map((item) => [item.evidence_id, item]))
   const runState = run?.status ?? 'ready'
   const runStateLabel = runState === 'running' ? 'Generating events' : runState === 'completed' ? 'Run complete' : runState
   const alertCategory = String(selectedAlert?.payload.category ?? 'all')
+  const focusedEpisode = selectedEpisodes.find((episode) => episode.category === alertCategory)
   const alertScore = selectedAlert
-    ? `${selectedAlert.payload.ticket_count} ${alertCategory} tickets / 30 min · expected ${Number(selectedAlert.payload.expected ?? 0).toFixed(1)}`
+    ? `${selectedAlert.payload.ticket_count} tickets in this 30-minute window · expected ${Number(selectedAlert.payload.expected ?? 0).toFixed(1)}`
     : 'Waiting for alert'
   const detectorScoreFields = (selectedAlert?.payload.signal as { scores?: Record<string, number> } | undefined)?.scores ?? {}
+  const progress = investigation?.progress ?? []
+  const report = investigation?.report
+  const reportFindings = report?.category_findings?.length
+    ? report.category_findings
+    : report ? selectedEpisodes.map((episode) => ({ category: episode.category, status: 'completed', summary: '', unresolved_questions: [] })) : []
+  const findingQuestions = new Set(reportFindings.flatMap((finding) => finding.unresolved_questions))
+  const reportQuestions = report?.unresolved_questions.filter((item) => !findingQuestions.has(item)) ?? []
+  const completedTools = [...new Set(progress.filter((step) => step.tool && step.type.includes('completed')).map((step) => investigationToolLabels[step.tool!] ?? step.tool!.replaceAll('_', ' ')))]
+  const activitySummary = investigation?.status === 'running'
+    ? (progress.at(-1)?.message ?? 'Collecting evidence from the selected incident.')
+    : completedTools.length ? `Reviewed ${completedTools.join(', ').toLowerCase()}.` : 'Investigation activity is available below.'
+  const episodeReportSummaries = report?.episode_summaries ?? []
 
   return (
     <main className="app-shell">
@@ -359,7 +611,7 @@ function App() {
       <div className="workspace">
         <aside className="sidebar">
           <div className="sidebar-label">WORKSPACE</div>
-          <button className="nav-item active"><span className="nav-icon">◈</span> Incident room <span className="nav-count">{alerts.length}</span></button>
+          <button className="nav-item active"><span className="nav-icon">◈</span> Live monitor <span className="nav-count">{alertEpisodes.length}</span></button>
           <button className="nav-item" onClick={() => setError('Metric anomaly monitoring is planned for the next milestone.')}><span className="nav-icon">⌁</span> Metric signals <span className="soon-tag">LATER</span></button>
           <button className="nav-item" onClick={() => setError('Evaluation reports are available through scripts/evaluate_detectors.py.')}><span className="nav-icon">▤</span> Evaluations</button>
           <div className="sidebar-divider" />
@@ -375,22 +627,22 @@ function App() {
         <section className="main-content">
           <div className="page-heading">
             <div>
-              <div className="eyebrow"><span className="eyebrow-line" /> INCIDENT OPERATIONS <span className="slash">/</span> LIVE ROOM</div>
-              <h1>Incident room <span className="live-label"><i /> LIVE</span></h1>
-              <p className="page-subtitle">Follow the signal. Ask the system. See what the evidence supports.</p>
+              <div className="eyebrow"><span className="eyebrow-line" /> MONITORING <span className="slash">/</span> TICKET SIGNALS</div>
+              <h1>Operations monitor <span className="live-label"><i /> LIVE</span></h1>
+              <p className="page-subtitle">Watch ticket volume by category. Select an alert to open its incident workspace.</p>
             </div>
             <div className="run-state"><span className={`status-dot ${runState}`} />{runStateLabel}<span className="state-time">{run ? `${observations.length} / 144 windows` : 'No run started'}</span></div>
           </div>
 
           {error && <div className="error-banner"><span>!</span>{error}<button onClick={() => setError('')}>Dismiss</button></div>}
 
-          <section className="control-strip panel">
-            <div className="control-heading"><div className="control-icon">▶</div><div><strong>Scenario controls</strong><small>Seeded, stochastic event stream</small></div></div>
+          <section className="simulation-toolbar panel">
+            <div className="control-heading"><div className="control-icon">▶</div><div><strong>Simulation settings</strong><small>Reproducible synthetic ticket activity</small></div></div>
             <label className="field"><span>Scenario</span><select value={scenario} onChange={(event) => setScenario(event.target.value)} disabled={runState === 'running'}>
               {Object.entries(scenarioNames).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select></label>
-            <label className="field compact"><span>Arrival model</span><select value={arrivalModel} onChange={(event) => setArrivalModel(event.target.value)} disabled={runState === 'running'}>
-              <option value="poisson">Poisson</option><option value="negative_binomial">Negative binomial</option>
+            <label className="field compact"><span>Ticket variation</span><select value={arrivalModel} onChange={(event) => setArrivalModel(event.target.value)} disabled={runState === 'running'}>
+              <option value="poisson">Baseline</option><option value="negative_binomial">Higher variation</option>
             </select></label>
             <label className="field seed-field"><span>Seed</span><input type="number" value={seed} onChange={(event) => setSeed(Number(event.target.value))} disabled={runState === 'running'} /></label>
             <label className="field speed-field"><span>Playback</span><select value={speed} onChange={(event) => setSpeed(event.target.value)} disabled={runState === 'running'}>
@@ -408,10 +660,10 @@ function App() {
           </div>}
 
           <div className="stat-grid">
-            <article className="stat-card panel"><div className="stat-label">ALL TICKETS · LAST WINDOW <span className="stat-icon mint">↗</span></div><div className="stat-value">{latestCount}<span className="stat-unit">tickets</span></div><div className="stat-foot"><span className="mint-text">{observations.length ? `${ratio.toFixed(1)}×` : '—'}</span> vs. initial baseline</div></article>
-            <article className="stat-card panel"><div className="stat-label">ALERT EVENTS <span className="stat-icon amber">⌁</span></div><div className="stat-value">{alerts.length.toString().padStart(2, '0')}</div><div className="stat-foot">Detector alerts emitted in this run</div></article>
-            <article className="stat-card panel"><div className="stat-label">INVESTIGATION <span className="stat-icon blue">✳</span></div><div className="stat-value small-value">{investigation?.status ?? '—'}</div><div className="stat-foot">Operator-triggered · evidence-linked</div></article>
-            <article className="stat-card panel"><div className="stat-label">WINDOW SIZE <span className="stat-icon violet">◷</span></div><div className="stat-value">30<span className="stat-unit">min</span></div><div className="stat-foot">Ticket count scoring interval</div></article>
+            <article className="stat-card panel"><div className="stat-label">ALL TICKETS · LAST 30 MIN <span className="stat-icon mint">↗</span></div><div className="stat-value">{latestCount}<span className="stat-unit">tickets</span></div><div className="stat-foot"><span className="mint-text">{observations.length ? `${ratio.toFixed(1)}×` : '—'}</span> vs. initial baseline</div></article>
+            <article className="stat-card panel"><div className="stat-label">ALERT EPISODES <span className="stat-icon amber">⌁</span></div><div className="stat-value">{alertEpisodes.length.toString().padStart(2, '0')}</div><div className="stat-foot">Periods of unusual ticket volume</div></article>
+            <article className="stat-card panel"><div className="stat-label">INVESTIGATION <span className="stat-icon blue">✳</span></div><div className="stat-value small-value">{investigation?.status === 'running' ? 'In progress' : investigation?.report ? 'Report ready' : '—'}</div><div className="stat-foot">Started by operator · evidence-based</div></article>
+            <article className="stat-card panel"><div className="stat-label">COUNTING WINDOW <span className="stat-icon violet">◷</span></div><div className="stat-value">30<span className="stat-unit">min</span></div><div className="stat-foot">Time grouped into each chart point</div></article>
           </div>
 
           <div className="content-grid">
@@ -421,30 +673,29 @@ function App() {
                 {categoryCards.map((card) => <button type="button" key={card.category}
                   className={`category-chart-card ${focusedCategory === card.category ? 'focused' : ''}`}
                   onClick={() => setFocusedCategory(card.category)} aria-pressed={focusedCategory === card.category}>
-                  <span className="category-chart-heading"><strong>{card.category}</strong><span className={card.alerting ? 'category-alerting' : ''}>{card.alerting ? 'ALERTING' : 'WITHIN RANGE'}</span></span>
+                  <span className="category-chart-heading"><strong>{card.category}</strong><span className={`category-chart-state${card.alerting ? ' category-alerting' : ''}`}><b>{selectedAlert && alertCategory === card.category ? 'SELECTED' : card.alerting ? 'ALERTING' : 'WITHIN RANGE'}</b><small>{card.episodes.length ? `${card.episodes.length} ${card.episodes.length === 1 ? 'episode' : 'episodes'}` : 'No alerts'}</small></span></span>
                   <span className="category-chart-current">{card.latestCount}<small> tickets · expected {card.expected.toFixed(1)}</small></span>
-                  <CountChart points={card.points} alertWindows={card.alertWindows} compact />
-                  <span className="category-chart-foot">Independent scale · {card.episodes.length} alert {card.episodes.length === 1 ? 'episode' : 'episodes'}</span>
+                  <CountChart points={card.points} alertWindows={card.alertWindows} compact centerWindow={selectedAlert ? Number(selectedAlert.payload.window_index) : undefined} selectedWindow={selectedAlert && alertCategory === card.category ? Number(selectedAlert.payload.window_index) : undefined} />
                 </button>)}
               </div>
-              <div className="chart-summary"><span><i className="legend-dot normal-dot" /> Normal baseline</span><span><i className="legend-dot alert-dot" /> Alert window</span><span className="chart-model">Model: {arrivalModel === 'poisson' ? 'Poisson' : 'Negative binomial'}</span></div>
-              <div className="detector-ribbon"><div className="ribbon-icon">∑</div><div><strong>Per-category detector ensemble</strong><small>Poisson & NB likelihood · Z-score · CUSUM · Gamma-Poisson BF</small></div><span className="ribbon-state">{observations.length ? 'SCORING' : 'IDLE'}</span></div>
+              <div className="chart-summary"><span><i className="legend-dot normal-dot" /> Typical activity</span><span><i className="legend-dot alert-dot" /> Alert window</span><span className="chart-scale-note">Each category has its own scale</span></div>
+              <div className="detector-ribbon"><div className="ribbon-icon">∑</div><div><strong>Ticket-volume checks</strong><small>Compares each category with its usual pattern and flags unusual or sustained increases.</small></div><span className="ribbon-state">{observations.length ? 'MONITORING' : 'WAITING'}</span></div>
             </section>
 
             <section className="panel timeline-panel">
-              <div className="panel-heading"><div><div className="section-kicker">OBSERVED EVIDENCE</div><h2>System timeline</h2></div><span className="record-count">{issueEvents.length} issue events</span></div>
+              <div className="panel-heading"><div><div className="section-kicker">SYSTEM EVENTS</div><h2>Issue timeline</h2></div><span className="record-count">{issueEvents.length} tracked issues</span></div>
               <div className="timeline-list">
                 {issueEvents.length === 0 && <div className="empty-timeline"><div className="empty-orbit">◷</div><strong>Waiting for system events</strong><span>The simulation will populate this timeline.</span></div>}
                 {issueEvents.slice(-4).reverse().map((event) => (
                   <div className="timeline-item" key={event.evidence_id}><div className={`timeline-marker ${event.event_type === 'issue_resolved' ? 'resolved' : 'issue'}`} /><div className="timeline-content"><div className="timeline-top"><strong>{String(event.payload.issue_key ?? 'Issue')}</strong><time>{timeLabel(event.simulated_at)}</time></div><p>{String(event.payload.title ?? event.event_type)}</p><span className={`issue-status ${String(event.payload.status ?? 'open')}`}>{String(event.payload.status ?? event.event_type).toUpperCase()}</span></div></div>
                 ))}
               </div>
-              <div className="evidence-source-row"><span className="source-led" /> FICTITIOUS ISSUE TRACKER <span className="source-count">{issueEvents.length}</span></div>
+              <div className="evidence-source-row"><span className="source-led" /> SYNTHETIC ISSUE TRACKER <span className="source-count">{issueEvents.length}</span></div>
             </section>
 
             <section className="panel alert-panel">
-              <div className="panel-heading"><div><div className="section-kicker">DETECTION OUTPUT</div><h2>Alert episodes</h2><p className="panel-subtitle">Choose one episode per category. The strongest window is selected by default.</p></div><span className={`alert-badge ${alerts.length ? 'has-alert' : ''}`}>{alerts.length ? `${alertEpisodes.length} EPISODES` : 'NO ALERT'}</span></div>
-              {alertEpisodes.length === 0 ? <div className="alert-empty"><span className="pulse-ring" />No threshold crossing yet. Each category is evaluated independently.</div> : <div className="episode-list">
+              <div className="panel-heading"><div><div className="section-kicker">ALERT FEED</div><h2>Ticket-volume alerts</h2><p className="panel-subtitle">Episodes group consecutive 30-minute alerts. Investigation covers the episode; choose a focus window for nearby detail.</p></div><span className={`alert-badge ${alerts.length ? 'has-alert' : ''}`}>{alerts.length ? `${alertEpisodes.length} EPISODES` : 'NO ALERTS'}</span></div>
+              {alertEpisodes.length === 0 ? <div className="alert-empty"><span className="pulse-ring" />No unusual ticket-volume periods yet. Each category is monitored separately.</div> : <div className="episode-list">
                 {categories.map((category) => {
                   const episodes = alertEpisodes.filter((episode) => episode.category === category)
                   if (!episodes.length) return null
@@ -452,50 +703,91 @@ function App() {
                     {episodes.map((episode) => {
                       const selectedId = effectiveSelectedAlertIds.find((id) => episode.alerts.some((alert) => alert.evidence_id === id))
                       const chosen = episode.alerts.find((alert) => alert.evidence_id === selectedId) ?? episode.peakAlert
+                      const durationMinutes = episode.alerts.length * 30
+                      const duration = durationMinutes % 60 === 0 ? `${durationMinutes / 60}h` : `${Math.floor(durationMinutes / 60)}h ${durationMinutes % 60}m`
                       return <div className={`episode-row ${selectedId ? 'selected' : ''}`} key={episode.key}>
                         <label className="episode-select"><input type="checkbox" checked={Boolean(selectedId)} onChange={() => toggleEpisode(episode)} />
-                          <span><strong>W{String(episode.alerts[0].payload.window_index)}–W{String(episode.alerts.at(-1)?.payload.window_index)}</strong><small>{episode.alerts.length} alert {episode.alerts.length === 1 ? 'window' : 'windows'} · peak {String(episode.peakAlert.payload.ticket_count)} tickets</small></span>
+                          <span><strong>W{String(episode.alerts[0].payload.window_index)}–W{String(episode.alerts.at(-1)?.payload.window_index)}</strong><small>{episode.alerts.length} consecutive {episode.alerts.length === 1 ? 'window' : 'windows'} · {duration}</small><small>Strongest signal: W{String(episode.peakAlert.payload.window_index)} · {String(episode.peakAlert.payload.ticket_count)} tickets</small></span>
                         </label>
-                        <label className="episode-window">Window<select aria-label={`Selected ${category} alert window`} disabled={!selectedId} value={chosen.evidence_id} onChange={(event) => chooseEpisodeWindow(episode, event.target.value)}>{episode.alerts.map((alert) => <option key={alert.evidence_id} value={alert.evidence_id}>W{String(alert.payload.window_index)} · {String(alert.payload.ticket_count)} tickets</option>)}</select></label>
+                        <label className="episode-window">Focus<select aria-label={`Focus window for ${category} episode`} disabled={!selectedId} value={chosen.evidence_id} onChange={(event) => chooseEpisodeWindow(episode, event.target.value)}>{episode.alerts.map((alert) => <option key={alert.evidence_id} value={alert.evidence_id}>W{String(alert.payload.window_index)} · {String(alert.payload.ticket_count)} tickets</option>)}</select></label>
                       </div>
                     })}
                   </div>
                 })}
               </div>}
-              {selectedAlert && <div className="selected-alert-detail"><strong>{alertCategory} · Window {String(selectedAlert.payload.window_index)}</strong><span>{alertScore}</span><div className="detector-tags">{(selectedAlert.payload.detectors_triggered as string[] ?? []).map((detector) => <span key={detector}>{detector.replaceAll('_', ' ')}</span>)}</div><div className="detector-values">{Object.entries(detectorScoreFields).map(([name, value]) => <span key={name}>{name.replaceAll('_', ' ')} <b>{Number(value).toFixed(2)}</b></span>)}</div></div>}
             </section>
 
             <section className="panel investigator-panel">
-              <div className="panel-heading"><div><div className="section-kicker">OPERATOR-TRIGGERED RCA</div><h2>Ask the investigator</h2></div><div className="agent-orb">✳</div></div>
-              <div className="investigator-prompt"><div className="prompt-avatar">AR</div><div><strong>Operator question</strong><small>Investigate {effectiveSelectedAlertIds.length || 'the selected'} alert {effectiveSelectedAlertIds.length === 1 ? 'episode' : 'episodes'} using available evidence.</small></div></div>
-              <div className="ask-row"><input value={question} onChange={(event) => setQuestion(event.target.value)} disabled={!effectiveSelectedAlertIds.length || investigation?.status === 'running'} aria-label="Question for investigator" /><button className="ask-button" onClick={investigate} disabled={!effectiveSelectedAlertIds.length || !question.trim() || investigation?.status === 'running'}>{investigation?.status === 'running' ? 'Investigating…' : `Investigate ${effectiveSelectedAlertIds.length || ''} ↗`}</button></div>
-              {!effectiveSelectedAlertIds.length && <div className="investigator-hint">Select one or more alert episodes to start an investigation.</div>}
-              {investigation?.progress && investigation.progress.length > 0 && <div className="investigation-progress" aria-live="polite"><div className="progress-heading"><strong>{investigation.status === 'running' ? 'Investigation in progress' : 'Investigation activity'}</strong><span>{investigation.progress.length} steps</span></div>{investigation.progress.map((step) => <div className={`progress-step ${step.type}`} key={step.sequence}><i />{step.tool ? <><code>{step.tool}</code><span>{step.message}</span></> : <span>{step.message}</span>}</div>)}</div>}
+              <div className="panel-heading"><div><div className="section-kicker">SELECTED INCIDENT</div><h2>Incident workspace</h2></div><div className="agent-orb">✳</div></div>
+              {selectedAlert && focusedEpisode ? <div className="workspace-signal"><span>Selected episode · {focusedEpisode.alerts.length} consecutive windows</span><strong>{alertCategory} · W{String(focusedEpisode.alerts[0].payload.window_index)}–W{String(focusedEpisode.alerts.at(-1)?.payload.window_index)}</strong><p>Strongest detector signal: W{String(focusedEpisode.peakAlert.payload.window_index)} · {String(focusedEpisode.peakAlert.payload.ticket_count)} tickets</p><p>Focus window: W{String(selectedAlert.payload.window_index)} · {alertScore}</p><details className="detection-details"><summary>Detector details for focus window</summary><div className="detector-tags">{(selectedAlert.payload.detectors_triggered as string[] ?? []).map((detector) => <span key={detector}>{detector.replaceAll('_', ' ')}</span>)}</div><div className="detector-values">{Object.entries(detectorScoreFields).map(([name, value]) => <span key={name}>{name.replaceAll('_', ' ')} <b>{Number(value).toFixed(2)}</b></span>)}</div></details></div> : <div className="workspace-empty">Select an alert episode to review its evidence and investigate the likely cause.</div>}
+              <div className="investigator-prompt"><div className="prompt-avatar">AR</div><div><strong>Operator question</strong><small>The investigator compares the selected window with up to two earlier windows and one later window, when available. The full episode and earlier records provide context.</small></div></div>
+              <div className="ask-row"><input value={question} onChange={(event) => setQuestion(event.target.value)} disabled={!effectiveSelectedAlertIds.length || investigation?.status === 'running'} aria-label="Question for investigator" /><button className="ask-button" onClick={investigate} disabled={!effectiveSelectedAlertIds.length || !question.trim() || investigation?.status === 'running'}>{investigation?.status === 'running' ? 'Investigating…' : effectiveSelectedAlertIds.length > 1 ? 'Investigate episodes' : 'Investigate episode'}</button></div>
+              {!effectiveSelectedAlertIds.length && <div className="investigator-hint">Select an episode to start an investigation. Choose one episode per category.</div>}
+              {progress.length > 0 && <details className="investigation-progress" open={investigation?.status === 'running'} aria-live="polite"><summary className="progress-heading"><strong>{investigation?.status === 'running' ? 'Investigation in progress' : 'Investigation activity'}</strong><span>{progress.length} updates</span></summary><p className="activity-summary">{activitySummary}</p><div className="progress-detail-list">{progress.filter((step) => !step.tool || !step.type.includes('started')).map((step) => <div className={`progress-step ${step.type}`} key={step.sequence}><i />{step.tool ? <><strong>{investigationToolLabels[step.tool] ?? step.tool.replaceAll('_', ' ')}</strong><span>{step.type.includes('completed') ? step.message : 'Checking evidence…'}</span></> : <span>{step.message}</span>}</div>)}</div></details>}
               {investigation?.status === 'failed' && <div className="investigation-error">{investigation.error || 'Investigation failed. Check API key or select offline demo mode.'}</div>}
-              {investigation?.report && <div className="report-content">
-                <div className={`report-status ${investigation.report.status}`}>{investigation.report.status === 'completed' ? 'EVIDENCE REVIEW COMPLETE' : investigation.report.status === 'incomplete' ? 'PARTIAL INVESTIGATION' : 'INSUFFICIENT EVIDENCE'}</div>
-                <p className="report-summary">{investigation.report.summary}</p>
-                {(investigation.report.category_findings?.length ? investigation.report.category_findings : selectedEpisodes.map((episode) => ({ category: episode.category, status: 'completed', summary: '', unresolved_questions: [] }))).map((finding) => <section className="category-finding" key={finding.category}>
-                  <div className="category-finding-heading"><h3>{finding.category}</h3><span className={`finding-status ${finding.status}`}>{finding.status}</span></div>
-                  {finding.summary && <p>{finding.summary}</p>}
-                  {investigation.report!.hypotheses.filter((hypothesis) => (hypothesis.categories ?? [selectedEpisodes[0]?.category]).includes(finding.category)).map((hypothesis) => <article className="hypothesis" key={`${finding.category}-${hypothesis.rank}-${hypothesis.title}`}>
-                  <div className="hypothesis-rank">0{hypothesis.rank}</div><div className="hypothesis-main"><strong>{hypothesis.title}</strong><p>{hypothesis.explanation}</p>
-                    <div className="citation-list">{hypothesis.supporting_evidence.map((id) => { const item = evidenceMap.get(id); return <span className="citation" key={id} title={`${item?.source ?? 'Evidence'} · ${item?.observed_at ?? ''}`}>↳ {item?.source ?? 'tool evidence'} · {id.slice(0, 8)}</span> })}</div>
-                    {hypothesis.contradicting_evidence.map((id) => <span className="citation contradiction" key={id}>↳ contrary evidence · {id.slice(0, 8)}</span>)}
-                  </div>
-                </article>)}
-                  {finding.unresolved_questions.map((item) => <div className="unresolved" key={item}><strong>Still unknown</strong><p>{item}</p></div>)}
-                </section>)}
-                {investigation.report.hypotheses.filter((hypothesis) => (hypothesis.categories?.length ?? 0) > 1).length > 0 && <section className="shared-findings"><h3>Possible shared causes</h3>{investigation.report.hypotheses.filter((hypothesis) => (hypothesis.categories?.length ?? 0) > 1).map((hypothesis) => <article className="hypothesis" key={`shared-${hypothesis.rank}-${hypothesis.title}`}><div className="hypothesis-main"><strong>{hypothesis.title}</strong><p>{hypothesis.explanation}</p><small>Categories: {hypothesis.categories?.join(', ')}</small><div className="citation-list">{hypothesis.supporting_evidence.map((id) => { const item = evidenceMap.get(id); return <span className="citation" key={id}>↳ {item?.source ?? 'tool evidence'} · {id.slice(0, 8)}</span> })}</div></div></article>)}</section>}
-                {investigation.report.unresolved_questions.length > 0 && <div className="unresolved"><strong>Still unknown</strong>{investigation.report.unresolved_questions.map((item) => <p key={item}>{item}</p>)}</div>}
-                <details className="trace-details"><summary>Investigation trace · {investigation.report.tool_trace.length} tool results</summary><div className="trace-list">{investigation.report.tool_trace.map((item, index) => <div key={`${item.tool}-${index}`}><code>{item.tool}</code><pre>{JSON.stringify(item.result, null, 2)}</pre></div>)}</div></details>
-              </div>}
             </section>
           </div>
 
+          {report && <section id="investigation-report" className="panel rca-report">
+            <div className="report-heading"><div><div className="section-kicker">INVESTIGATION REPORT</div><h2>What we found</h2></div><span className={`report-status ${report.status}`}>{report.status === 'completed' ? 'LIKELY EXPLANATION' : report.status === 'incomplete' ? 'PARTIAL FINDING' : 'NOT ENOUGH EVIDENCE'}</span></div>
+            {!episodeReportSummaries.length && <div className="investigation-error">The report's window summary is unavailable. Refresh it after restarting the API. <button type="button" onClick={async () => {
+              if (!run || !investigation) return
+              try {
+                const fresh = await request<Investigation>(`/api/runs/${run.run_id}/investigations/${investigation.investigation_id}`)
+                setInvestigation(fresh)
+                if (!fresh.report?.episode_summaries?.length) setError('The API did not return a window summary. Check that only one API server is running with the current code.')
+              } catch (issue) {
+                setError(issue instanceof Error ? issue.message : 'Could not refresh the report.')
+              }
+            }}>Refresh window summary</button></div>}
+            <div className="episode-context-label">FULL EPISODE CONTEXT · These totals describe the entire selected alert episode.</div>
+            <div className="episode-overview-grid">{episodeReportSummaries.map((item) => <article className="episode-overview" key={`${item.category}-${item.start_window_index}`}>
+              <div className="episode-overview-heading"><strong>{item.category}</strong><span>W{item.start_window_index}–W{item.end_window_index}</span></div>
+              <p>{item.alert_window_count} consecutive windows · {item.duration_minutes % 60 === 0 ? `${item.duration_minutes / 60}h` : `${Math.floor(item.duration_minutes / 60)}h ${item.duration_minutes % 60}m`}</p>
+              <div className="episode-overview-metrics"><span><small>Tickets in episode</small><b>{item.total_tickets} / {item.expected_total.toFixed(1)} expected</b></span><span><small>Prior equal-length period</small><b>{item.baseline.average_tickets_per_window === null ? 'Unavailable' : `${item.baseline.average_tickets_per_window.toFixed(1)} tickets / 30 min`}</b></span><span><small>Service error rate</small><b>{item.service_errors.episode.error_rate === null ? 'No log data' : `${(item.service_errors.episode.error_rate * 100).toFixed(1)}%`}{item.service_errors.baseline.error_rate === null ? '' : ` vs ${(item.service_errors.baseline.error_rate * 100).toFixed(1)}% before`}</b></span></div>
+              <div className="episode-focus-summary">Focus group: {item.focus.available_windows} {item.focus.available_windows === 1 ? 'window' : 'windows'} · W{item.focus.start_window_index}–W{item.focus.end_window_index} · selected W{item.focus_window_index} · strongest episode signal W{item.strongest_window.window_index}</div>
+              {(item.baseline.missing_windows || item.expected_window_coverage < item.alert_window_count) && <small className="episode-coverage-note">Some baseline or expected values are unavailable; comparisons use recorded windows only.</small>}
+            </article>)}</div>
+            {(reportFindings.length > 1 || report.hypotheses.length === 0) && <p className="report-summary">{report.summary}</p>}
+            <div className="report-findings">{reportFindings.map((finding) => {
+              const focusSummary = episodeReportSummaries.find((item) => item.category === finding.category)
+              const hypotheses = report.hypotheses.filter((hypothesis) => (hypothesis.categories ?? [selectedEpisodes[0]?.category]).includes(finding.category) && (hypothesis.categories?.length ?? 0) <= 1)
+              const showFindingSummary = finding.summary && (reportFindings.length > 1 || hypotheses.length === 0)
+              const uniqueQuestions = finding.unresolved_questions.filter((item) => !report.unresolved_questions.includes(item))
+              return <section className="category-finding" key={finding.category}>
+                <div className="category-finding-heading"><h3>{finding.category}</h3><span className={`finding-status ${finding.status}`}>{finding.status === 'completed' ? 'REVIEWED' : finding.status.replaceAll('_', ' ').toUpperCase()}</span></div>
+                {showFindingSummary && <p>{finding.summary}</p>}
+                <FocusWindowTable summary={focusSummary} />
+                {hypotheses.map((hypothesis) => <article className="hypothesis" key={`${finding.category}-${hypothesis.rank}-${hypothesis.title}`}>
+                  <div className="hypothesis-rank">{hypothesis.rank === 1 ? 'JOINT LEAD' : `#${hypothesis.rank}`}</div><div className="hypothesis-main"><h3>{hypothesis.title}</h3><p>{hypothesis.explanation}</p>
+                    <div className="report-evidence-group"><span>Supporting evidence by scope</span><ScopedEvidenceList ids={hypothesis.supporting_evidence} evidenceMap={evidenceMap} focusSummaries={focusSummary ? [focusSummary] : []} /></div>
+                    {hypothesis.contradicting_evidence.length > 0 && <div className="report-evidence-group contrary-group"><span>Evidence that does not fit</span><ScopedEvidenceList ids={hypothesis.contradicting_evidence} evidenceMap={evidenceMap} focusSummaries={focusSummary ? [focusSummary] : []} contradiction /> </div>}
+                  </div>
+                </article>)}
+                {uniqueQuestions.map((item) => <div className="unresolved" key={item}><strong>What remains unknown</strong><p>{item}</p></div>)}
+              </section>
+            })}</div>
+            {report.hypotheses.filter((hypothesis) => (hypothesis.categories?.length ?? 0) > 1).length > 0 && <section className="shared-findings"><h3>Possible shared causes</h3>{report.hypotheses.filter((hypothesis) => (hypothesis.categories?.length ?? 0) > 1).map((hypothesis) => {
+              const categorySummaries = episodeReportSummaries.filter((item) => hypothesis.categories?.includes(item.category))
+              return <article className="hypothesis" key={`shared-${hypothesis.rank}-${hypothesis.title}`}><div className="hypothesis-main"><h3>{hypothesis.title}</h3><p>{hypothesis.explanation}</p><small>Affects: {hypothesis.categories?.join(', ')}</small><div className="report-evidence-group"><span>Supporting evidence by scope</span><ScopedEvidenceList ids={hypothesis.supporting_evidence} evidenceMap={evidenceMap} focusSummaries={categorySummaries} /></div></div></article>
+            })}</section>}
+            {reportQuestions.length > 0 && <section className="unresolved report-unknown"><strong>What remains unknown</strong>{reportQuestions.map((item) => <p key={item}>{item}</p>)}</section>}
+            {(report.recommendations ?? []).length > 0 && <section className="recommendations"><div className="recommendation-heading"><h3>Recommended next step</h3><span>ADVISORY ONLY</span></div>{(report.recommendations ?? []).map((item) => <article className="recommendation" key={`${item.category}-${item.runbook_id ?? item.title}`}><strong>{item.title}</strong><p>{item.next_step}</p><small><b>Verify:</b> {item.verification}</small>{item.supporting_evidence.length > 0 && <div className="report-evidence-group"><span>Based on evidence by scope</span><ScopedEvidenceList ids={item.supporting_evidence} evidenceMap={evidenceMap} focusSummaries={episodeReportSummaries.filter((summary) => summary.category === item.category)} /></div>}</article>)}</section>}
+            <details className="evidence-details"><summary>All evidence records · {report.evidence.length}</summary>
+              {[
+                { label: 'Within the selected focus groups', records: report.evidence.filter((item) => isEvidenceInFocus(item, episodeReportSummaries)) },
+                { label: 'Additional context outside the selected focus groups', records: report.evidence.filter((item) => !isEvidenceInFocus(item, episodeReportSummaries)) },
+              ].filter((group) => group.records.length > 0).map((group) => <section className="all-evidence-group" key={group.label}>
+                <h3>{group.label}</h3><div>{group.records.map((item) => <article key={item.evidence_id}><strong>{evidenceSourceLabels[item.source] ?? 'Evidence record'} · {timeLabel(item.observed_at)}</strong><small>{evidenceSourceDescriptions[item.source] ?? 'Evidence used in this investigation.'}</small><p>{item.summary}</p><details className="technical-details"><summary>Technical details</summary><code>{item.evidence_id}</code></details></article>)}</div>
+              </section>)}
+            </details>
+            <details className="trace-details"><summary>Technical investigation trace · {report.tool_trace.length} results</summary><div className="trace-list">{report.tool_trace.map((item, index) => <div key={`${item.tool}-${index}`}><code>{item.tool}</code><pre>{JSON.stringify(item.result, null, 2)}</pre></div>)}</div></details>
+          </section>}
+
           <section className="panel feed-panel">
-            <div className="panel-heading"><div><div className="section-kicker">RECENT CUSTOMER SIGNAL</div><h2>Latest support tickets</h2></div><span className="record-count">{recentTickets.length} shown</span></div>
-            {recentTickets.length === 0 ? <div className="feed-empty">New synthetic tickets will appear as the event stream advances.</div> : <div className="ticket-table"><div className="ticket-header"><span>TICKET</span><span>SUMMARY</span><span>CHANNEL</span><span>TIME</span></div>{recentTickets.map((ticket) => <div className="ticket-row" key={ticket.evidence_id}><span className="ticket-key">{String(ticket.payload.ticket_key)}</span><span><i className={`category-dot ${ticket.payload.category === 'payments' ? 'payment' : ''}`} />{String(ticket.payload.title)}</span><span className="ticket-channel">{String(ticket.payload.channel)}</span><time>{timeLabel(ticket.simulated_at)}</time></div>)}</div>}
+            <div className="panel-heading"><div><div className="section-kicker">RECENT CUSTOMER MESSAGES</div><h2>Latest support tickets</h2></div><span className="record-count">{recentTickets.length} shown</span></div>
+            <p className="panel-subtitle">Each message is one ticket. These messages are synthetic; customers who did not contact support are not shown.</p>
+            {recentTickets.length === 0 ? <div className="feed-empty">New synthetic tickets will appear as the event stream advances.</div> : <div className="ticket-table"><div className="ticket-header"><span>TICKET</span><span>CUSTOMER MESSAGE</span><span>CHANNEL</span><span>TIME</span></div>{recentTickets.map((ticket) => <div className="ticket-row" key={ticket.evidence_id}><span className="ticket-key">{String(ticket.payload.ticket_key)}</span><span className="ticket-summary"><strong><i className={`category-dot ${ticket.payload.category === 'payments' ? 'payment' : ''}`} />{String(ticket.payload.title)}</strong><small>{String(ticket.payload.body ?? '')}</small><details><summary>Read full message</summary><p>{String(ticket.payload.body ?? '')}</p></details><em>{String(ticket.payload.reason ?? 'support contact').replaceAll('_', ' ')}</em></span><span className="ticket-channel">{String(ticket.payload.channel)}</span><time>{timeLabel(ticket.simulated_at)}</time></div>)}</div>}
           </section>
 
           <footer className="footer-note"><span>◈</span> Local synthetic environment <i /> Statistical scores are diagnostic evidence, not proof of causality.</footer>

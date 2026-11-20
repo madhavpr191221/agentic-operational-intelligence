@@ -6,7 +6,7 @@ Evaluate the detector and investigator as separate components. Detector threshol
 
 ## Case set
 
-Use reproducible `payment_issue`, `healthy`, `unrelated_issue`, and `resolved_issue` runs. Include a positive payment-category signal plus control investigations where the input signal is anomalous but the evidence does not support the proposed payment cause. Keep calibration seeds `0–99` separate from evaluation seeds `100–149`; add new seed ranges for later regression runs.
+Use reproducible `payment_issue`, `healthy`, `unrelated_issue`, and `resolved_issue` runs. Build each selected signal from that run's actual detector score and matching 30-minute evidence window; do not substitute fabricated alert scores. The payment case checks supported cause reasoning, while healthy, unrelated, and resolved cases check abstention or appropriately qualified findings. Keep calibration seeds `0–99` separate from evaluation seeds `100–149`; add new seed ranges for later regression runs.
 
 ## Measures
 
@@ -14,6 +14,9 @@ Use reproducible `payment_issue`, `healthy`, `unrelated_issue`, and `resolved_is
 - **Control overclaim rate:** for healthy, unrelated, or resolved evidence, count hypotheses that claim an unsupported payment cause.
 - **Citation validity:** valid cited evidence IDs divided by all cited IDs; target 100% after application-side filtering.
 - **Evidence coverage:** whether the investigation searched relevant evidence sources and found records within the selected signal's run.
+- **Analysis-tool coverage:** whether the investigator used category comparison, reason/channel contribution ranking, timeline ordering, and before/after comparison.
+- **Message grounding:** whether a supported explanation cites a customer message whose text matches the reported failure mode.
+- **Recommendation grounding:** every actionable runbook suggestion must cite evidence returned in that investigation; evidence-free cases should ask for more data.
 - **Efficiency:** record model turns, read-only tool calls, duration, and safety-ceiling hits; do not reward extra calls when they add no relevant evidence.
 - **Abstention:** verify that weak or contradictory evidence can produce no ranked cause and clear unresolved questions.
 
@@ -23,7 +26,7 @@ First inspect saved tool traces for missed evidence, repeated searches, and unsu
 
 ## Demo acceptance
 
-From the browser, start the seeded payment scenario, select the payments alert, and run an investigation. The UI must show the detector context, ordered tool starts/results, and a final hypothesis whose citations resolve to the displayed evidence. Repeat with mock mode to demonstrate the same UI offline. Healthy and resolved controls should not be described as proven payment causes.
+From the browser, start the seeded payment scenario, select the payments alert, and run an investigation. The UI must show the detector context, customer message text, ordered tool starts/results, a final hypothesis whose citations resolve to displayed evidence, and advisory next steps with a verification check. Repeat with mock mode to demonstrate the same UI offline. Healthy and resolved controls should not be described as proven payment causes. Each email/chat/comment represented here is one ticket record; text is evidence attached to that count, not an extra count.
 
 ## Multi-Category Regressions
 

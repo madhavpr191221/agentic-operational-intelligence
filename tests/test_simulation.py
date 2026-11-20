@@ -43,6 +43,17 @@ class SimulationTests(unittest.TestCase):
         self.assertTrue(latest)
         self.assertNotIn("payments", [event.payload["category"] for event in latest])
 
+    def test_each_ticket_is_one_message_record_and_counts_reconcile(self):
+        windows = list(generate_run(SimulationConfig(seed=31, window_count=12, calibration_windows=4)))
+        for window in windows:
+            tickets = [event for event in window.events if event.source == "support_tickets"]
+            self.assertEqual(len(tickets), window.ticket_count)
+            self.assertEqual(sum(window.category_counts.values()), window.ticket_count)
+            self.assertTrue(all(event.payload.get("body") for event in tickets))
+            self.assertTrue(all(event.payload.get("reason") for event in tickets))
+            self.assertEqual({category: sum(event.payload["category"] == category for event in tickets)
+                              for category in window.category_counts}, window.category_counts)
+
 
 if __name__ == "__main__":
     unittest.main()

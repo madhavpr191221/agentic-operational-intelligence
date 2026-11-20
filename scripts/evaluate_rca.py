@@ -40,9 +40,27 @@ def _has_positive_evidence(report: dict, records: dict[str, dict]) -> bool:
                          for item in cited)
     payment_log = any(item.get("payload", {}).get("service") == "checkout-payments"
                       and item.get("payload", {}).get("errors", 0) > 0 for item in cited)
-    open_issue = any(item.get("payload", {}).get("service") == "checkout-payments"
-                     and item.get("payload", {}).get("status") == "open" for item in cited)
-    return payment_ticket and payment_log and open_issue
+    latest_issue_state: dict[str, tuple[str, str]] = {}
+    for item in records.values():
+        payload = item.get("payload", {})
+        if item.get("source") == "issue_tracker" and payload.get("service") == "checkout-payments":
+            key = str(payload.get("issue_key", item.get("evidence_id")))
+            stamp = str(item.get("observed_at", ""))
+            if key not in latest_issue_state or stamp > latest_issue_state[key][0]:
+                latest_issue_state[key] = (stamp, str(payload.get("status", "unknown")))
+    open_issue = any(status == "open" for _, status in latest_issue_state.values())
+    message_support = any(item.get("payload", {}).get("category") == "payments"
+                          and any(token in str(item.get("payload", {}).get("body", "")).casefold()
+                                  for token in ("authorization", "payment", "checkout")) for item in cited)
+    return payment_ticket and payment_log and open_issue and message_support
+
+
+def _runbook_grounding(report: dict, records: dict[str, dict]) -> tuple[int, int]:
+    actions = [item for item in report.get("recommendations", []) if item.get("runbook_id")]
+    grounded = sum(bool(item.get("supporting_evidence"))
+                   and set(item.get("supporting_evidence", [])) <= set(records)
+                   for item in actions)
+    return grounded, len(actions)
 
 
 def evaluate(seed_count: int = 1, first_seed: int = 200, model: str | None = None) -> dict:
@@ -59,17 +77,29 @@ def evaluate(seed_count: int = 1, first_seed: int = 200, model: str | None = Non
                 if not completed or completed["status"] != "completed":
                     raise RuntimeError(f"Synthetic run failed for {scenario}, seed {seed}.")
                 observations = runtime.store.search_events(
-                    run["run_id"], ("detector",), limit=1, event_types=("window_observation",)
+                    run["run_id"], ("detector",), limit=1000, event_types=("window_observation",)
                 )
                 last = observations[-1]
+                window_index = int(last["payload"]["window_index"])
+                window_scores = runtime.store.search_events(
+                    run["run_id"], ("detector",), limit=1000, event_types=("window_score",)
+                )
+                score_event = next((item for item in window_scores
+                                    if item["payload"].get("window_index") == window_index), None)
+                payment_scores = ((score_event or {}).get("payload", {}).get("scores_by_category", {})
+                                  .get("payments", {}))
+                detector_scores = {str(item["detector"]): float(item["score"])
+                                   for item in payment_scores.get("scores", [])}
                 signal = {
                     "metric": "support_ticket_arrivals", "category": "payments",
                     "window_index": last["payload"]["window_index"],
                     "window_start": last["payload"]["window_start"],
                     "window_end": last["payload"]["window_end"], "window_minutes": 30,
-                    "observed": 74, "expected": 4.0, "arrival_model": "poisson",
-                    "scores": {"z_score": 8.4, "cusum": 12.1,
-                               "log_likelihood_ratio": 9.7},
+                    "observed": payment_scores.get("observed", 0),
+                    "expected": payment_scores.get("expected"), "arrival_model": "poisson",
+                    "scores": {"z_score": detector_scores.get("standardized_residual", 0),
+                               "cusum": detector_scores.get("cusum", 0),
+                               "log_likelihood_ratio": detector_scores.get("poisson_llr", 0)},
                 }
                 context = {"metric": signal["metric"], "category": signal["category"],
                            "window_index": signal["window_index"],
@@ -87,6 +117,10 @@ def evaluate(seed_count: int = 1, first_seed: int = 200, model: str | None = Non
                                                 + hypothesis.get("contradicting_evidence", []))]
                 valid_citations = sum(evidence_id in records for evidence_id in citations)
                 positive_support = _has_positive_evidence(report, records)
+                grounded_actions, runbook_actions = _runbook_grounding(report, records)
+                analytical_tools = {"compare_categories", "rank_ticket_contributors",
+                                    "build_incident_timeline", "compare_before_after"}
+                called_tools = {entry.get("tool") for entry in report.get("tool_trace", [])}
                 unsupported_payment_claim = scenario != "payment_issue" and any(
                     "payment" in (hypothesis.get("title", "") + " " + hypothesis.get("explanation", "")).casefold()
                     and not positive_support
@@ -98,6 +132,11 @@ def evaluate(seed_count: int = 1, first_seed: int = 200, model: str | None = Non
                     "unsupported_payment_claim": unsupported_payment_claim,
                     "abstained": not bool(report.get("hypotheses")),
                     "valid_citations": valid_citations, "citations": len(citations),
+                    "analytical_tools_used": sorted(analytical_tools & called_tools),
+                    "analytical_tool_coverage": len(analytical_tools & called_tools) / len(analytical_tools),
+                    "grounded_runbook_actions": grounded_actions,
+                    "runbook_actions": runbook_actions,
+                    "runbook_grounding_rate": grounded_actions / max(1, runbook_actions),
                     "tool_calls": len(report.get("tool_trace", [])),
                     "duration_seconds": round(duration, 2),
                 })
@@ -110,6 +149,9 @@ def evaluate(seed_count: int = 1, first_seed: int = 200, model: str | None = Non
         "control_abstention_rate": sum(row["abstained"] for row in controls) / max(1, len(controls)),
         "citation_validity_rate": (sum(row["valid_citations"] for row in rows)
                                    / max(1, sum(row["citations"] for row in rows))),
+        "mean_analytical_tool_coverage": sum(row["analytical_tool_coverage"] for row in rows) / max(1, len(rows)),
+        "runbook_grounding_rate": (sum(row["grounded_runbook_actions"] for row in rows)
+                                   / max(1, sum(row["runbook_actions"] for row in rows))),
         "mean_tool_calls": sum(row["tool_calls"] for row in rows) / max(1, len(rows)),
         "mean_duration_seconds": round(sum(row["duration_seconds"] for row in rows) / max(1, len(rows)), 2),
     }

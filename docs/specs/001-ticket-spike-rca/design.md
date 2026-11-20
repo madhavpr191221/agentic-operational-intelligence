@@ -2,11 +2,12 @@
 
 ## Components
 
-- **Simulator:** seeded random generators produce event windows and separate ground-truth labels.
+- **Simulator:** seeded random generators produce event windows and separate ground-truth labels. Every support event is one ticket with one synthetic customer message, category, observable reason, channel, and timestamp. Message wording uses an independent random stream so text sampling does not perturb ticket-count arrivals.
 - **Detectors:** pure functions score total and per-category observed counts; each method returns expected value, score name/value, threshold, and alert flag. Each emitted alert carries the selected metric/category/window plus Z-score, CUSUM, and model-specific log-likelihood ratio.
 - **SQLite store:** append-only run, event, alert, and investigation records; evaluator-only truth is stored separately.
-- **Evidence tools:** read-only, bounded queries over a single run and time window.
-- **Investigator:** one OpenAI Agents SDK agent, structured candidate notes, read-only evidence tools, adaptive bounded turns, and persisted lifecycle/tool progress. A no-tools report-composition pass checks those notes against returned records and uses a schema that restricts citations to collected evidence handles. The investigator receives detector scores as context and does not recompute them.
+- **Evidence tools:** read-only, bounded searches over one run plus deterministic category comparison, ticket reason/channel contribution ranking, incident timeline, and before/after service/ticket comparison. Returned records carry evidence IDs; missing intervals remain explicit.
+- **Runbook lookup:** deterministic fictional recommendations that require evidence from the selected run. Actions are advisory, include a verification step, and cannot execute operational changes.
+- **Investigator:** one OpenAI Agents SDK agent, structured candidate notes, read-only search/analysis/runbook tools, adaptive bounded turns, and persisted lifecycle/tool progress. A no-tools report-composition pass checks those notes against returned records and uses a schema that restricts citations to collected evidence handles. The investigator receives detector scores as context and does not recompute them.
 - **API/UI:** FastAPI local service and React/TypeScript/Vite single-page operator console. SSE carries simulation events; HTTP controls runs and returns persisted investigation progress and reports. The incident room renders four independent category charts, groups adjacent anomaly alerts into episodes, and submits one representative alert window per selected category. The API retains the legacy single-alert field while accepting a bounded list of up to four IDs.
 - **Category RCA:** The investigator receives only the selected category/window records. The report composer returns a finding for each selected category and separate shared-cause candidates; application validation retains only selected categories and citations present in returned evidence. Unselected categories are not investigated.
 
@@ -20,6 +21,7 @@ For Poisson counts use the upward generalized log-likelihood ratio `x log(x / mu
 - Invalid tool names/arguments are rejected; tools never accept arbitrary SQL or filesystem paths.
 - API absence/errors yield a clear investigation failure; explicit mock mode is available for offline demonstrations and tests. Agent traces contain tool activity and results, not private model reasoning.
 - Unresolved/contradictory evidence is represented in the report rather than hidden.
+- A support message is not double-counted: one incoming interaction corresponds to one ticket event, and ticket volume excludes customers who never contacted support.
 
 ## Later Metric Extension
 

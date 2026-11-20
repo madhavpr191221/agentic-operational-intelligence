@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from agentic_ops.agent import MockInvestigator
-from agentic_ops.domain import SimulationConfig
+from agentic_ops.domain import RCAReport, SimulationConfig
 from agentic_ops.service import OperationsRuntime
 from agentic_ops.store import EventStore
 
@@ -51,6 +51,11 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(cited)
         self.assertTrue(cited.issubset(evidence_ids))
         self.assertEqual([finding["category"] for finding in report["category_findings"]], ["payments"])
+        ticket_evidence = [item for item in report["evidence"] if item["source"] == "support_tickets"]
+        self.assertTrue(any(item["summary"] != "ticket_created" for item in ticket_evidence))
+        self.assertTrue(report["recommendations"])
+        for recommendation in report["recommendations"]:
+            self.assertTrue(set(recommendation["supporting_evidence"]).issubset(evidence_ids))
 
     def test_investigation_rejects_duplicate_categories(self):
         config = SimulationConfig(seed=4, window_count=52, calibration_windows=20,
@@ -62,6 +67,42 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "one alert episode per category"):
             self.runtime.start_investigation(run["run_id"], "Compare these signals",
                                              alert_evidence_ids=[alert["evidence_id"], earlier_alert["evidence_id"]])
+
+    def test_completed_report_keeps_scope_when_investigator_omits_it(self):
+        """Scope belongs to orchestration, including provider early-return paths."""
+        class InvestigatorWithoutScope:
+            def investigate(self, *args, **kwargs):
+                return RCAReport("abstained", "Insufficient evidence", [], [])
+
+        self.runtime._provided_investigator = InvestigatorWithoutScope()
+        run = self.runtime.start_run(SimulationConfig(
+            seed=42, tick_delay_seconds=0.0))
+        self.runtime.wait_for_run(run["run_id"], timeout=20)
+        alerts = self.runtime.store.search_events(
+            run["run_id"], ("detector",), limit=1000, event_types=("anomaly_alert",))
+        indices = {int(a["payload"]["window_index"]) for a in alerts
+                   if a["payload"]["category"] == "payments"}
+        end = max(indices)
+        start = end
+        while start - 1 in indices:
+            start -= 1
+        started = self.runtime.start_investigation(
+            run["run_id"], "Investigate the selected episode", episode_selections=[{
+                "category": "payments", "start_window_index": start,
+                "end_window_index": end, "focus_window_index": end,
+            }])
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            saved = self.runtime.store.get_investigation(started["investigation_id"])
+            if saved["status"] not in {"queued", "running"}:
+                break
+            time.sleep(0.02)
+        self.assertEqual(saved["status"], "abstained")
+        summary = saved["report"]["episode_summaries"][0]
+        windows = summary["focus"]["window_series"]
+        self.assertEqual([w["window_index"] for w in windows], [end - 2, end - 1, end])
+        self.assertTrue(all(w["start_at"] and w["end_at"] for w in windows))
+        self.assertEqual(summary["focus"]["total_tickets"], sum(w["tickets"] for w in windows))
 
 
 if __name__ == "__main__":
