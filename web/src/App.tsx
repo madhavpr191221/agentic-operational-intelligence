@@ -18,7 +18,7 @@ type Run = {
   error?: string | null
 }
 
-type EvidenceItem = { evidence_id: string; source: string; observed_at: string; summary: string; window_index?: number | null }
+type EvidenceItem = { evidence_id: string; source: string; observed_at: string; summary: string; window_index?: number | null; page_number?: number | null; source_path?: string | null; section_title?: string | null }
 type FocusWindow = {
   window_index: number
   available?: boolean
@@ -55,6 +55,8 @@ const evidenceSourceLabels: Record<string, string> = {
   product_logs: 'Service log',
   issue_tracker: 'Tracked issue',
   change_log: 'Change record',
+  runbooks: 'Runbook',
+  knowledge_docs: 'Reference document',
 }
 
 const evidenceSourceDescriptions: Record<string, string> = {
@@ -63,6 +65,8 @@ const evidenceSourceDescriptions: Record<string, string> = {
   product_logs: 'A synthetic product or service event, such as an error.',
   issue_tracker: 'A fictional incident record and its current status.',
   change_log: 'A fictional deployment or configuration change record.',
+  runbooks: 'Synthetic operating guidance extracted from a PDF page.',
+  knowledge_docs: 'Fictional service guides, historical reviews, and deployment guidance.',
 }
 
 const investigationToolLabels: Record<string, string> = {
@@ -76,6 +80,9 @@ const investigationToolLabels: Record<string, string> = {
   compare_before_after: 'Compare before and after',
   analyze_focus_window: 'Analyze selected-window group',
   suggest_runbook_actions: 'Review suggested actions',
+  search_related_evidence: 'Search related evidence',
+  search_operational_docs: 'Search operating guides',
+  compare_ticket_themes: 'Compare ticket themes',
 }
 
 const detectorDisplayNames: Record<string, string> = {
@@ -90,10 +97,10 @@ function EvidenceCitation({ item, id, contradiction = false }: { item?: Evidence
   const label = item ? evidenceSourceLabels[item.source] ?? 'Evidence record' : 'Evidence record unavailable'
   return (
     <details className="citation-detail">
-      <summary className={`citation${contradiction ? ' contradiction' : ''}`} aria-label={`View ${label}${item ? ` from ${timeLabel(item.observed_at)}` : ''}`}>{contradiction ? `Contrary evidence · ${label}` : label}{item ? ` · ${timeLabel(item.observed_at)}` : ''}</summary>
+      <summary className={`citation${contradiction ? ' contradiction' : ''}`} aria-label={`View ${label}${item ? ` from ${evidenceTimeLabel(item)}` : ''}`}>{contradiction ? `Contrary evidence · ${label}` : label}{item ? ` · ${evidenceTimeLabel(item)}` : ''}</summary>
       <div className="citation-preview">
         <strong>{label}</strong>
-        {item && <><small>{evidenceSourceDescriptions[item.source] ?? 'Evidence used in this investigation.'}</small><time>{timeLabel(item.observed_at)}</time><p>{item.summary}</p></>}
+        {item && <><small>{evidenceSourceDescriptions[item.source] ?? 'Evidence used in this investigation.'}</small><time>{evidenceTimeLabel(item)}</time><p>{item.summary}</p></>}
         <details className="technical-details"><summary>Technical details</summary><code>{id}</code></details>
       </div>
     </details>
@@ -119,6 +126,7 @@ function exactTimestamp(value: string) {
 
 function isEvidenceInFocus(item: EvidenceItem | undefined, focusSummaries: EpisodeSummary[]) {
   if (!item) return false
+  if (item.source === 'runbooks') return false
   const focused = new Set(focusSummaries.flatMap((summary) =>
     (summary.focus.window_series ?? []).filter((window) => window.available).map((window) => window.window_index)))
   if (item.window_index !== undefined && item.window_index !== null) return focused.has(item.window_index)
@@ -223,6 +231,8 @@ const scenarioNames: Record<string, string> = {
   healthy: 'Healthy control',
   unrelated_issue: 'Unrelated issue distractor',
   resolved_issue: 'Resolved payment issue',
+  orders_queue_backlog: 'Order processing backlog',
+  delivery_carrier_degradation: 'Carrier service degradation',
 }
 
 const categories = ['payments', 'orders', 'account', 'delivery'] as const
@@ -243,6 +253,12 @@ function timeLabel(value: string) {
     timeZone: 'UTC',
     timeZoneName: 'short',
   })
+}
+
+function evidenceTimeLabel(record: EvidenceItem) {
+  if (record.page_number && record.source_path) return `${record.source_path} - page ${record.page_number}`
+  if (record.section_title && record.source_path) return `${record.source_path} - ${record.section_title}`
+  return timeLabel(record.observed_at)
 }
 
 function CountChart({ points, alertWindows, compact = false, centerWindow, selectedWindow }: {

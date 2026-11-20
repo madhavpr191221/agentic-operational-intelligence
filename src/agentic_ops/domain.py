@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-ScenarioName = Literal["payment_issue", "healthy", "unrelated_issue", "resolved_issue"]
+ScenarioName = Literal[
+    "payment_issue", "healthy", "unrelated_issue", "resolved_issue",
+    "orders_queue_backlog", "delivery_carrier_degradation",
+]
 ArrivalModel = Literal["poisson", "negative_binomial"]
 CATEGORIES = ("payments", "orders", "account", "delivery")
 
@@ -46,6 +49,9 @@ class EvidenceRef:
     observed_at: str
     summary: str
     window_index: int | None = None
+    page_number: int | None = None
+    source_path: str | None = None
+    section_title: str | None = None
 
 
 @dataclass

@@ -14,6 +14,11 @@ from agentic_ops.domain import CATEGORIES, SimulationConfig
 WINDOW_MINUTES = 30
 SIMULATION_START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 PAYMENT_INCIDENT_FAILURE_PROBABILITY = 0.26
+INCIDENT_CATEGORY = {
+    "payment_issue": "payments",
+    "orders_queue_backlog": "orders",
+    "delivery_carrier_degradation": "delivery",
+}
 
 
 @dataclass
@@ -66,10 +71,9 @@ def _iso(value: datetime) -> str:
 def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -> Iterator[GeneratedWindow]:
     """Generate 72 simulated hours in 30-minute windows.
 
-    The first day is a baseline. In the payment scenario, an issue is opened at
-    simulated hour 24, remains unresolved, and a late payment failure raises
-    Payments from about 5 to about 31 tickets per window. The detector receives
-    only the resulting per-category counts.
+    The first day is a baseline. Incident scenarios plant a late increase in one
+    category, with corresponding but independently generated text and service
+    evidence. Only the per-category counts are passed to detection.
     """
     if config.window_count < 4:
         raise ValueError("window_count must be at least 4")
@@ -91,19 +95,49 @@ def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -
     start = SIMULATION_START
     issue_window = min(config.calibration_windows, config.window_count // 3)
     resolved_window = min(issue_window + 12, config.window_count - 1)
-    issue_key = "PAY-204" if config.scenario in ("payment_issue", "resolved_issue") else "CAT-118"
+    scenario_category = INCIDENT_CATEGORY.get(config.scenario)
+    issue_key = {
+        "payment_issue": "PAY-204", "orders_queue_backlog": "ORD-318",
+        "delivery_carrier_degradation": "DEL-092", "resolved_issue": "PAY-205",
+    }.get(config.scenario, "CAT-118")
+    issue_details = {
+        "payment_issue": ("Payment authorization timeouts", "checkout-payments",
+                          "Customers report authorization timeouts; gateway responses are delayed."),
+        "orders_queue_backlog": ("Order processing queue is growing", "orders-api",
+                                 "Order workers are falling behind and order status is delayed."),
+        "delivery_carrier_degradation": ("Carrier API requests are timing out", "delivery-api",
+                                         "Carrier status requests are slow or rate limited."),
+        "resolved_issue": ("Payment authorization timeouts", "checkout-payments",
+                           "Intermittent authorization failures reported."),
+    }
 
     for index in range(config.window_count):
         window_start = start + timedelta(minutes=WINDOW_MINUTES * index)
         window_end = window_start + timedelta(minutes=WINDOW_MINUTES)
         events: list[GeneratedEvent] = []
 
-        if config.scenario in ("payment_issue", "resolved_issue") and index == issue_window:
+        if config.scenario in issue_details and index == issue_window:
+            issue_title, issue_service, issue_description = issue_details[config.scenario]
             events.append(GeneratedEvent(
                 simulated_at=_iso(window_start), source="issue_tracker", event_type="issue_created",
-                payload={"issue_key": issue_key, "title": "Payment authorization timeouts", "status": "open",
-                         "service": "checkout-payments", "description": "Intermittent authorization failures reported."},
+                payload={"issue_key": issue_key, "title": issue_title, "status": "open",
+                         "service": issue_service, "description": issue_description,
+                         "project": "OPS", "priority": "P2"},
             ))
+            events.append(GeneratedEvent(
+                simulated_at=_iso(window_start + timedelta(hours=1)), source="issue_tracker", event_type="issue_updated",
+                payload={"issue_key": issue_key, "title": issue_title, "status": "investigating",
+                         "service": issue_service, "update": "Owner is collecting time-aligned diagnostics."},
+            ))
+        if scenario_category and index == max(issue_window, config.window_count - 5):
+            # A temporally nearby but unrelated change is a deliberate distractor.
+            events.append(GeneratedEvent(
+                simulated_at=_iso(window_start - timedelta(minutes=15)), source="change_log", event_type="change_record",
+                payload={"change_key": "CHG-889", "service": "catalog-search",
+                         "summary": "Search cache parameter adjusted", "outcome": "monitoring_required",
+                         "author": "platform-team"},
+            ))
+        if config.scenario in ("payment_issue", "resolved_issue") and index == issue_window:
             events.append(GeneratedEvent(
                 simulated_at=_iso(window_start + timedelta(minutes=2)), source="change_log", event_type="change_record",
                 payload={"change_key": "CHG-771", "service": "checkout-payments", "summary": "Gateway retry configuration updated",
@@ -153,13 +187,50 @@ def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -
                          "message": "Payment authorization timeout observed." if failed_attempts else "Payment requests healthy."},
             ))
 
+        orders_requests = 500 + _poisson(evidence_rng, 40.0)
+        orders_errors = _poisson(evidence_rng, 3.0)
+        orders_queue_depth = max(0, int(evidence_rng.gauss(12.0, 4.0)))
+        if config.scenario == "orders_queue_backlog" and index >= config.window_count - 4:
+            orders_queue_depth += 900 + 100 * (index - (config.window_count - 4))
+            orders_errors += _poisson(evidence_rng, 20.0)
+        events.append(GeneratedEvent(
+            simulated_at=_iso(window_start + timedelta(minutes=6)), source="product_logs",
+            event_type="service_log_summary",
+            payload={"service": "orders-api", "requests": orders_requests, "errors": orders_errors,
+                     "queue_depth": orders_queue_depth,
+                     "oldest_job_seconds": max(1, int(orders_queue_depth * 1.5)),
+                     "level": "warning" if orders_queue_depth > 100 else "info",
+                     "message": "Order worker queue depth elevated; jobs are waiting for processing."
+                     if orders_queue_depth > 100 else "Order worker queue within normal range."},
+        ))
+        delivery_requests = 400 + _poisson(evidence_rng, 35.0)
+        delivery_errors = _poisson(evidence_rng, 2.0)
+        carrier_latency_ms = max(80, int(evidence_rng.gauss(240, 35)))
+        if config.scenario == "delivery_carrier_degradation" and index >= config.window_count - 4:
+            delivery_errors += _poisson(evidence_rng, 95.0)
+            carrier_latency_ms += 1800 + 300 * (index - (config.window_count - 4))
+        events.append(GeneratedEvent(
+            simulated_at=_iso(window_start + timedelta(minutes=8)), source="product_logs",
+            event_type="service_log_summary",
+            payload={"service": "delivery-api", "dependency": "northstar-carrier-api",
+                     "requests": delivery_requests, "errors": delivery_errors,
+                     "p95_latency_ms": carrier_latency_ms,
+                     "rate_limited": delivery_errors if carrier_latency_ms > 1000 else 0,
+                     "level": "error" if delivery_errors > 20 else "info",
+                     "message": "Carrier API timeouts and rate limits observed."
+                     if delivery_errors > 20 else "Carrier API responses within normal range."},
+        ))
+
         means = dict(zip(CATEGORIES, config.baseline_category_means, strict=True))
+        incident_addition = 0.0
+        if scenario_category and index >= config.window_count - 4:
+            incident_addition = (failed_attempts * config.contact_probability_per_failure
+                                 if scenario_category == "payments" else 22.0)
         if config.arrival_model == "negative_binomial":
             category_counts = {
                 category: _negative_binomial(
                     rng,
-                    means[category] + (failed_attempts * config.contact_probability_per_failure
-                                       if category == "payments" else 0.0),
+                    means[category] + (incident_addition if category == scenario_category else 0.0),
                     config.negative_binomial_shape,
                 )
                 for category in CATEGORIES
@@ -168,25 +239,23 @@ def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -
             category_counts = {
                 category: _poisson(
                     rng,
-                    means[category] + (failed_attempts * config.contact_probability_per_failure
-                                       if category == "payments" else 0.0),
+                    means[category] + (incident_addition if category == scenario_category else 0.0),
                 )
                 for category in CATEGORIES
             }
         ticket_count = sum(category_counts.values())
-        incident_payment_share = min(
+        incident_ticket_share = min(
             1.0,
-            failed_attempts * config.contact_probability_per_failure
-            / max(category_counts["payments"], 1),
+            incident_addition / max(category_counts.get(scenario_category or "", 0), 1),
         )
         ticket_number = 0
         for category, category_ticket_count in category_counts.items():
             for _ in range(category_ticket_count if include_ticket_events else 0):
-                is_incident_payment = category == "payments" and ticket_rng.random() < incident_payment_share
+                is_incident_ticket = category == scenario_category and ticket_rng.random() < incident_ticket_share
                 offset = ticket_rng.randrange(WINDOW_MINUTES)
                 ticket_time = window_start + timedelta(minutes=offset)
                 if category == "payments":
-                    if is_incident_payment:
+                    if is_incident_ticket:
                         reason, title, body = message_rng.choice((
                             ("authorization_failure", "Payment did not go through", "I tried to pay at checkout, but the payment did not go through. The authorization request timed out."),
                             ("authorization_failure", "Checkout showed an authorization error", "Checkout returned an authorization error when I submitted payment, so I could not complete the purchase."),
@@ -200,6 +269,20 @@ def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -
                             ("card_declined", "Card was declined", "My card was declined at checkout. Can you help me understand why?"),
                             ("billing_question", "Question about a charge", "I have a question about a charge shown on my account."),
                         ))
+                elif category == "orders" and is_incident_ticket:
+                    reason, title, body = message_rng.choice((
+                        ("order_processing_delay", "Order is still processing", "My order was accepted, but it has stayed in processing much longer than usual."),
+                        ("order_status_stalled", "Order status has not moved", "The order page has shown the same processing status for hours. Can you check it?"),
+                        ("checkout_order_unclear", "Not sure if my order completed", "Checkout finished, but I never received a clear confirmation that the order entered processing."),
+                        ("order_processing_delay", "Order confirmation is delayed", "I submitted the order and payment, but the order confirmation is taking a long time."),
+                    ))
+                elif category == "delivery" and is_incident_ticket:
+                    reason, title, body = message_rng.choice((
+                        ("carrier_tracking_timeout", "Tracking is not updating", "The carrier tracking page times out and my package has no recent scan."),
+                        ("delivery_status_stalled", "Delivery status is stuck", "My package status has not changed, and the carrier page is unavailable."),
+                        ("carrier_eta_missing", "Delivery estimate disappeared", "The delivery estimate disappeared after the carrier tracking service stopped responding."),
+                        ("carrier_tracking_timeout", "Carrier page will not load", "I cannot get a response from the carrier tracking link to check my delivery."),
+                    ))
                 else:
                     reason, title, body = message_rng.choice({
                         "orders": (

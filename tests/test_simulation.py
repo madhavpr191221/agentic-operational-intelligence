@@ -42,6 +42,22 @@ class SimulationTests(unittest.TestCase):
         self.assertGreater(max(w.category_counts["payments"] for w in windows[-4:]),
                            min(w.category_counts["payments"] for w in windows[-4:]))
 
+    def test_order_and_delivery_incidents_change_only_their_own_ticket_category(self):
+        for scenario, category in (("orders_queue_backlog", "orders"),
+                                   ("delivery_carrier_degradation", "delivery")):
+            with self.subTest(scenario=scenario):
+                windows = list(generate_run(SimulationConfig(scenario=scenario, seed=17)))
+                baseline = sum(w.category_counts[category] for w in windows[:48]) / 48
+                incident = sum(w.category_counts[category] for w in windows[-4:]) / 4
+                self.assertGreater(incident, baseline * 2)
+                for other in set(windows[0].category_counts) - {category}:
+                    self.assertLess(sum(w.category_counts[other] for w in windows[-4:]) / 4,
+                                    max(16, windows[0].category_counts[other] * 4))
+                log_events = [event for window in windows[-4:] for event in window.events
+                              if event.source == "product_logs"
+                              and event.payload.get("service") == ("orders-api" if category == "orders" else "delivery-api")]
+                self.assertEqual(len(log_events), 4)
+
     def test_issue_is_opened_48_hours_before_end(self):
         windows = list(generate_run(SimulationConfig(seed=1)))
         events = [event for window in windows for event in window.events
@@ -69,6 +85,16 @@ class SimulationTests(unittest.TestCase):
             self.assertTrue(all(event.payload.get("reason") for event in tickets))
             self.assertEqual({category: sum(event.payload["category"] == category for event in tickets)
                               for category in window.category_counts}, window.category_counts)
+
+    def test_incident_wording_does_not_change_counts_or_ticket_record_count(self):
+        for scenario in ("payment_issue", "orders_queue_backlog", "delivery_carrier_degradation"):
+            config = SimulationConfig(scenario=scenario, seed=93, window_count=16, calibration_windows=4)
+            full = list(generate_run(config))
+            counts = list(generate_run(config, include_ticket_events=False))
+            self.assertEqual([w.category_counts for w in full], [w.category_counts for w in counts])
+            for window in full:
+                tickets = [event for event in window.events if event.source == "support_tickets"]
+                self.assertEqual(len(tickets), window.ticket_count)
 
 
 if __name__ == "__main__":

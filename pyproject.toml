@@ -11,7 +11,9 @@ dependencies = [
   "fastapi>=0.115,<1",
   "openai>=1.66",
   "openai-agents>=0.25.0",
+  "pypdf>=6.0,<7",
   "python-dotenv>=1.0,<2",
+  "reportlab>=4.2,<5",
   "uvicorn[standard]>=0.30,<1",
 ]
 

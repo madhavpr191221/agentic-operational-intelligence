@@ -24,6 +24,8 @@ class RuntimeTests(unittest.TestCase):
         result = self.runtime.wait_for_run(run["run_id"], timeout=20)
         self.assertEqual(result["status"], "completed")
         events = self.runtime.store.list_events(run["run_id"], limit=2000)
+        self.assertTrue(any(event["source"] == "knowledge_docs"
+                            and event["event_type"] == "document_passage" for event in events))
         self.assertTrue(any(event["event_type"] == "window_observation" for event in events))
         self.assertTrue(any(event["event_type"] == "window_score" for event in events))
         self.assertTrue(any(event["event_type"] == "anomaly_alert" for event in events))

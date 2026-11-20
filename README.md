@@ -4,17 +4,33 @@ A local, fictional operations-intelligence demo that detects category-specific s
 
 ## What the demo includes
 
-- A seeded 72-hour simulator for payment failures and healthy, unrelated-issue, and resolved-issue controls, with payments, orders, account, and delivery categories.
+- A seeded 72-hour simulator for payment authorization, order-queue, and carrier-service incidents, plus healthy, unrelated-change, and resolved-issue controls.
 - Poisson and negative-binomial ticket arrivals, scored with likelihood ratios, standardized residuals, upward CUSUM, and a Gamma–Poisson Bayes factor.
 - Synthetic, read-only evidence tools and an operator-triggered investigation that returns cited hypotheses.
 - One synthetic customer message per ticket, with observable reason, category, channel, and timestamp fields. Each message is the ticket record counted by the detector; no-contact customers are outside this dataset.
 - Deterministic investigator tools compare categories, rank ticket reasons/channels, build an incident timeline, and compare before/after ticket and service-error rates.
+- Customer-message themes are compared with an equal-length pre-incident baseline. Text searches use keyword and semantic similarity; service logs use structured fields and a strict investigation-time cutoff.
+- Four fictional runbooks have editable Markdown sources and searchable text PDFs. Service and dependency guidance, historical postmortems, and deployment guidance are additional searchable Markdown documents. Citations identify the source path and page or section.
 - Evidence-grounded fictional runbook suggestions include a verification check and never execute operational changes.
 - Empirically calibrated category-specific detector thresholds and held-out detector evaluation.
 - Four category charts, consecutive alert episodes, selectable focus windows, event timelines, category reports, and light/dark themes.
 - Joint focus-window analysis in chronological order: T-2, T-1, T, and T+1 when available, with exact UTC intervals, ticket counts, service errors, and scoped citations.
 
-All records are generated locally from a reproducible seed. No external incident data is needed.
+All incident, ticket, service, issue, and change records are fictional and generated from a reproducible seed. No external incident data is needed.
+
+### Synthetic evidence corpus and retrieval
+
+Each support interaction is one ticket and contributes exactly one to its category count. The simulator uses separate seeded random streams for counts, event evidence, and wording, so editing customer language does not change detector inputs. The new scenarios add an order-worker backlog and a carrier API degradation; their ticket text is varied and noisy, while service logs and issue records carry separate corroborating evidence. Incident scenarios also include a nearby catalog-search change as an innocent distractor. The hidden scenario truth remains in an evaluator-only table.
+
+The evidence world has several source types rather than one collection of PDFs: customer tickets, structured service logs, Jira-like issue histories, deployment/change records, four runbooks, service/dependency guidance, historical postmortems, and prior deployment notes. Tickets, logs, issues, and changes remain structured records; they are not duplicated as documents. Markdown is the editable source for reference documents. Runbook PDFs are retained for page-level citations; Markdown sources cite their file and section.
+
+The investigator searches tickets, issue descriptions, changes, and operational documents using keyword overlap plus OpenAI `text-embedding-3-small` similarity. Logs remain structured telemetry queries. Dated records and reference documents are restricted to material available by the alert cutoff. Historical postmortems suggest checks but do not prove that an old cause recurred. Cached vectors are stored in the local SQLite database by model and content hash. The first search for new content may call the embeddings API and incur usage; repeated searches reuse the local cache. Without an API key, text retrieval falls back to keyword ranking, while live investigations still require the key.
+
+All time-varying searches stop at the selected investigation cutoff; runbooks are static references. To regenerate the searchable PDF assets after editing their Markdown sources:
+
+```powershell
+uv run python scripts/build_runbooks.py
+```
 
 ## Detection and investigation are separate
 
@@ -121,7 +137,7 @@ npm run build
 
 The detector evaluator reports per-category payment-signal recall, false-alert episodes per simulated day, and detection delay across held-out synthetic seeds and arrival assumptions. See [the RCA evaluation design](docs/experiments/002-rca-agent-evaluation.md) for the investigator rubric and control cases.
 
-Run a small live RCA evaluation with one investigation per scenario (payment cause plus three controls):
+Run the live RCA evaluation across three incident causes and three controls. Positive scenarios are investigated only when the statistical detector alerts during the planted incident windows; controls are investigated when they emit an alert, so the report measures false-cause claims and abstention conditional on an alert:
 
 ```powershell
 uv run python scripts/evaluate_rca.py --seed-count 1

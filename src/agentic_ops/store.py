@@ -84,7 +84,47 @@ class EventStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_investigation_events_id_seq
                     ON investigation_events(investigation_id, sequence);
+                CREATE TABLE IF NOT EXISTS embedding_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    model TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    vector_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
             """)
+
+    def get_cached_embedding(self, cache_key: str) -> list[float] | None:
+        with self._connection() as connection:
+            row = connection.execute("SELECT vector_json FROM embedding_cache WHERE cache_key=?",
+                                     (cache_key,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def get_cached_embeddings(self, cache_keys: list[str]) -> dict[str, list[float]]:
+        """Fetch multiple cached vectors without opening one connection per document."""
+        found: dict[str, list[float]] = {}
+        with self._connection() as connection:
+            for offset in range(0, len(cache_keys), 500):
+                batch = cache_keys[offset:offset + 500]
+                if not batch:
+                    continue
+                placeholders = ",".join("?" for _ in batch)
+                rows = connection.execute(
+                    f"SELECT cache_key,vector_json FROM embedding_cache WHERE cache_key IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                found.update({row["cache_key"]: json.loads(row["vector_json"]) for row in rows})
+        return found
+
+    def cache_embeddings(self, entries: list[tuple[str, str, str, list[float]]]) -> None:
+        if not entries:
+            return
+        with self._connection() as connection:
+            connection.executemany(
+                "INSERT OR REPLACE INTO embedding_cache(cache_key,model,content_hash,vector_json,created_at) "
+                "VALUES(?,?,?,?,?)",
+                [(key, model, digest, json.dumps(vector), utc_now())
+                 for key, model, digest, vector in entries],
+            )
 
     def create_run(self, scenario: str, seed: int, arrival_model: str, config: dict[str, Any]) -> str:
         run_id = str(uuid.uuid4())
@@ -145,7 +185,9 @@ class EventStore:
             sql += " AND simulated_at>=?"
             params.append(start_at)
         if end_at is not None:
-            sql += " AND simulated_at<=?"
+            # Evidence intervals are half-open: an event at the cutoff belongs
+            # to the next window and was not yet observable at this alert.
+            sql += " AND simulated_at<?"
             params.append(end_at)
         sql += " ORDER BY sequence DESC LIMIT ?"
         params.append(min(max(limit * 8, 1), 1000))

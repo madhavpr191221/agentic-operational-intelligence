@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Python backend code lives in `src/agentic_ops/`; tests are in `tests/`. The React/TypeScript/Vite UI is under `web/`. Specs, design notes, and the roadmap are under `docs/`. Runtime SQLite data belongs under `.data/` and is ignored by Git.
+Python backend code lives in `src/agentic_ops/`; tests are in `tests/`. The React/TypeScript/Vite UI is under `web/`. Specs, design notes, and the roadmap are under `docs/`. Fictional runbook Markdown/PDF assets live under `data/runbooks/`; editable service guides, historical postmortems, and deployment guidance live under `data/knowledge_base/`. Regenerate runbook PDFs with `uv run python scripts/build_runbooks.py`. Runtime SQLite data, including cached embeddings, belongs under `.data/` and is ignored by Git.
 
 ## Build, Test, and Development Commands
 
@@ -20,11 +20,11 @@ Use port `5173` for the UI. Verify the selected port is free before restarting; 
 
 ## Coding Style & Naming Conventions
 
-For Python, use four spaces, type hints on public interfaces, `snake_case` functions/modules, and `PascalCase` types. Keep simulation truth separate from observable events, statistical functions pure, and LLM/provider code outside the detector core. Use TypeScript with React components in `PascalCase` and local variables in `camelCase`.
+For Python, use four spaces, type hints on public interfaces, `snake_case` functions/modules, and `PascalCase` types. Keep simulation truth separate from observable events, statistical functions pure, and LLM/provider code outside the detector core. Retrieval may inspect ticket text and evidence, but all time-varying evidence searches must enforce the selected investigation cutoff. Use TypeScript with React components in `PascalCase` and local variables in `camelCase`.
 
 ## Testing Guidelines
 
-Place Python tests under `tests/` as `test_*.py`. Cover seeded simulation, statistical boundaries, truth isolation, tool evidence, and API behavior. Run the focused tests while editing and the full suite before handoff. Build the frontend with `npm run build` from `web/`.
+Place Python tests under `tests/` as `test_*.py`. Cover seeded simulation, count-to-ticket reconciliation, independent text randomness, statistical boundaries, truth isolation, cutoff enforcement, PDF page and Markdown section citations, retrieval ranking/cache behavior, and API behavior. Mock embeddings in tests; never make paid API calls from the test suite. Run the focused tests while editing and the full suite before handoff. Build the frontend with `npm run build` from `web/`.
 
 ## Commit & Pull Request Guidelines
 

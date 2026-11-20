@@ -21,6 +21,7 @@ from agentic_ops.detection import (
 from agentic_ops.domain import CATEGORIES, SimulationConfig
 from agentic_ops.evidence import EvidenceTools
 from agentic_ops.simulation import generate_run
+from agentic_ops.retrieval import load_knowledge_passages, load_runbook_pages
 from agentic_ops.store import EventStore
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -69,14 +70,26 @@ class OperationsRuntime:
         control = RunControl()
         with self._lock:
             self._controls[run_id] = control
+        truth_by_scenario = {
+            "payment_issue": "payment_authorization_failure",
+            "orders_queue_backlog": "order_worker_queue_backlog",
+            "delivery_carrier_degradation": "carrier_api_degradation",
+            "unrelated_issue": "unrelated_search_issue",
+            "resolved_issue": "resolved_payment_issue",
+            "healthy": "none",
+        }
         truth = {"scenario": config.scenario,
-                 "cause": "payment_authorization_failure" if config.scenario == "payment_issue" else
-                         ("unrelated_search_issue" if config.scenario == "unrelated_issue" else "none"),
+                 "cause": truth_by_scenario.get(config.scenario, "none"),
                  "issue_opens_at_window": min(config.calibration_windows, config.window_count // 3),
                  "severe_failure_starts_at_window": config.window_count - 4}
         self.store.add_truth(run_id, truth)
-        self.store.set_run_status(run_id, "running")
         start = "2026-01-01T00:00:00Z"
+        for page in load_runbook_pages():
+            self.store.add_event(run_id, start, "runbooks", "runbook_page", page)
+        for passage in load_knowledge_passages():
+            self.store.add_event(run_id, passage["available_at"], "knowledge_docs",
+                                 "document_passage", passage)
+        self.store.set_run_status(run_id, "running")
         self.store.add_event(run_id, start, "system", "run_started",
                              {"scenario": config.scenario, "seed": config.seed, "arrival_model": config.arrival_model,
                               "window_count": config.window_count})
