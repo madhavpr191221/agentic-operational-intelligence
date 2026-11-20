@@ -78,6 +78,14 @@ const investigationToolLabels: Record<string, string> = {
   suggest_runbook_actions: 'Review suggested actions',
 }
 
+const detectorDisplayNames: Record<string, string> = {
+  poisson_llr: 'Poisson log-likelihood ratio',
+  negative_binomial_llr: 'Negative-binomial log-likelihood ratio',
+  standardized_residual: 'Standardized residual',
+  cusum: 'CUSUM',
+  gamma_poisson_bayes_factor: 'Gamma–Poisson Bayes factor',
+}
+
 function EvidenceCitation({ item, id, contradiction = false }: { item?: EvidenceItem; id: string; contradiction?: boolean }) {
   const label = item ? evidenceSourceLabels[item.source] ?? 'Evidence record' : 'Evidence record unavailable'
   return (
@@ -576,6 +584,12 @@ function App() {
     ? `${selectedAlert.payload.ticket_count} tickets in this 30-minute window · expected ${Number(selectedAlert.payload.expected ?? 0).toFixed(1)}`
     : 'Waiting for alert'
   const detectorScoreFields = (selectedAlert?.payload.signal as { scores?: Record<string, number> } | undefined)?.scores ?? {}
+  const detectorResults = (selectedAlert?.payload.scores as Array<{
+    detector?: string
+    score?: number
+    threshold?: number
+    anomalous?: boolean
+  }> | undefined) ?? []
   const progress = investigation?.progress ?? []
   const report = investigation?.report
   const reportFindings = report?.category_findings?.length
@@ -719,7 +733,11 @@ function App() {
 
             <section className="panel investigator-panel">
               <div className="panel-heading"><div><div className="section-kicker">SELECTED INCIDENT</div><h2>Incident workspace</h2></div><div className="agent-orb">✳</div></div>
-              {selectedAlert && focusedEpisode ? <div className="workspace-signal"><span>Selected episode · {focusedEpisode.alerts.length} consecutive windows</span><strong>{alertCategory} · W{String(focusedEpisode.alerts[0].payload.window_index)}–W{String(focusedEpisode.alerts.at(-1)?.payload.window_index)}</strong><p>Strongest detector signal: W{String(focusedEpisode.peakAlert.payload.window_index)} · {String(focusedEpisode.peakAlert.payload.ticket_count)} tickets</p><p>Focus window: W{String(selectedAlert.payload.window_index)} · {alertScore}</p><details className="detection-details"><summary>Detector details for focus window</summary><div className="detector-tags">{(selectedAlert.payload.detectors_triggered as string[] ?? []).map((detector) => <span key={detector}>{detector.replaceAll('_', ' ')}</span>)}</div><div className="detector-values">{Object.entries(detectorScoreFields).map(([name, value]) => <span key={name}>{name.replaceAll('_', ' ')} <b>{Number(value).toFixed(2)}</b></span>)}</div></details></div> : <div className="workspace-empty">Select an alert episode to review its evidence and investigate the likely cause.</div>}
+              {selectedAlert && focusedEpisode ? <div className="workspace-signal"><span>Selected episode · {focusedEpisode.alerts.length} consecutive windows</span><strong>{alertCategory} · W{String(focusedEpisode.alerts[0].payload.window_index)}–W{String(focusedEpisode.alerts.at(-1)?.payload.window_index)}</strong><p>Strongest detector signal: W{String(focusedEpisode.peakAlert.payload.window_index)} · {String(focusedEpisode.peakAlert.payload.ticket_count)} tickets</p><p>Focus window: W{String(selectedAlert.payload.window_index)} · {alertScore}</p><details className="detection-details"><summary>Why this alert fired</summary><p className="detection-explanation">Unusually high ticket volume; the cause is not identified here.</p><div className="detector-score-cards">
+                <article><span>Above expected</span><strong>{detectorScoreFields.z_score === undefined ? 'Unavailable' : `${Number(detectorScoreFields.z_score).toFixed(2)} standard deviations`}</strong></article>
+                <article><span>Across recent windows</span><strong>{detectorScoreFields.cusum === undefined ? 'Unavailable' : Number(detectorScoreFields.cusum).toFixed(2)}</strong></article>
+                <article><span>Count vs. baseline</span><strong>{detectorScoreFields.log_likelihood_ratio === undefined ? 'Unavailable' : Number(detectorScoreFields.log_likelihood_ratio).toFixed(2)}</strong></article>
+              </div><details className="technical-detector-details"><summary>Technical detector results</summary>{detectorResults.length ? <div className="detector-results-table"><div className="detector-result-row detector-result-heading"><span>Method</span><span>Score</span><span>Cutoff</span><span>Result</span></div>{detectorResults.map((result, index) => <div className="detector-result-row" key={result.detector ?? index}><span>{detectorDisplayNames[result.detector ?? ''] ?? result.detector ?? 'Unknown method'}</span><span>{result.score === undefined ? '—' : Number(result.score).toFixed(2)}</span><span>{result.threshold === undefined ? '—' : Number(result.threshold).toFixed(2)}</span><span className={result.anomalous ? 'detector-triggered' : 'detector-not-triggered'}>{result.anomalous ? 'Triggered' : 'Not triggered'}</span></div>)}</div> : <p className="technical-detector-empty">Detailed method scores are unavailable for this saved alert.</p>}</details></details></div> : <div className="workspace-empty">Select an alert episode to review its evidence and investigate the likely cause.</div>}
               <div className="investigator-prompt"><div className="prompt-avatar">AR</div><div><strong>Operator question</strong><small>The investigator compares the selected window with up to two earlier windows and one later window, when available. The full episode and earlier records provide context.</small></div></div>
               <div className="ask-row"><input value={question} onChange={(event) => setQuestion(event.target.value)} disabled={!effectiveSelectedAlertIds.length || investigation?.status === 'running'} aria-label="Question for investigator" /><button className="ask-button" onClick={investigate} disabled={!effectiveSelectedAlertIds.length || !question.trim() || investigation?.status === 'running'}>{investigation?.status === 'running' ? 'Investigating…' : effectiveSelectedAlertIds.length > 1 ? 'Investigate episodes' : 'Investigate episode'}</button></div>
               {!effectiveSelectedAlertIds.length && <div className="investigator-hint">Select an episode to start an investigation. Choose one episode per category.</div>}
