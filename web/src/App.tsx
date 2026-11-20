@@ -18,7 +18,36 @@ type Run = {
   error?: string | null
 }
 
-type EvidenceItem = { evidence_id: string; source: string; observed_at: string; summary: string }
+type EvidenceItem = { evidence_id: string; source: string; observed_at: string; summary: string; window_index?: number | null }
+type FocusWindow = {
+  window_index: number
+  available?: boolean
+  start_at?: string | null
+  end_at?: string | null
+  tickets: number | null
+  expected: number | null
+  alerting: boolean
+  is_focus: boolean
+  service_errors: number | null
+  service_requests: number | null
+  service_error_rate: number | null
+}
+type EpisodeSummary = {
+  category: string
+  start_window_index: number
+  end_window_index: number
+  focus_window_index: number
+  alert_window_count: number
+  duration_minutes: number
+  total_tickets: number
+  expected_total: number
+  expected_window_coverage: number
+  average_tickets_per_window: number
+  baseline: { window_count: number; expected_window_count: number; total_tickets: number; average_tickets_per_window: number | null; missing_windows: boolean }
+  service_errors: { episode: { errors: number; requests: number; error_rate: number | null }; baseline: { errors: number; requests: number; error_rate: number | null } }
+  strongest_window: { window_index: number; tickets: number; severity_ratio: number }
+  focus: { start_window_index: number; end_window_index: number; start_at?: string; end_at?: string; available_windows: number; requested_windows: number; total_tickets?: number; expected_total?: number; expected_window_coverage?: number; service_errors: { errors: number; requests: number; error_rate: number | null }; window_series?: FocusWindow[] }
+}
 
 const evidenceSourceLabels: Record<string, string> = {
   detector: 'Detector alert',
@@ -45,6 +74,7 @@ const investigationToolLabels: Record<string, string> = {
   rank_ticket_contributors: 'Rank ticket reasons',
   build_incident_timeline: 'Build event timeline',
   compare_before_after: 'Compare before and after',
+  analyze_focus_window: 'Analyze selected-window group',
   suggest_runbook_actions: 'Review suggested actions',
 }
 
@@ -72,6 +102,70 @@ function EvidenceList({ ids, evidenceMap, contradiction = false }: { ids: string
   </>
 }
 
+function exactTimestamp(value: string) {
+  return `${new Date(value).toLocaleString('en-GB', {
+    timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  })} UTC`
+}
+
+function isEvidenceInFocus(item: EvidenceItem | undefined, focusSummaries: EpisodeSummary[]) {
+  if (!item) return false
+  const focused = new Set(focusSummaries.flatMap((summary) =>
+    (summary.focus.window_series ?? []).filter((window) => window.available).map((window) => window.window_index)))
+  if (item.window_index !== undefined && item.window_index !== null) return focused.has(item.window_index)
+  const timestamp = Date.parse(item.observed_at)
+  return focusSummaries.some((summary) => (summary.focus.window_series ?? []).some((window) =>
+    window.available && window.start_at && window.end_at
+    && timestamp >= Date.parse(window.start_at) && timestamp < Date.parse(window.end_at)))
+}
+
+function ScopedEvidenceList({ ids, evidenceMap, focusSummaries, contradiction = false }: {
+  ids: string[]
+  evidenceMap: Map<string, EvidenceItem>
+  focusSummaries: EpisodeSummary[]
+  contradiction?: boolean
+}) {
+  const scopeLabel = focusSummaries.length === 1
+    ? `${focusSummaries[0].focus.available_windows}-window focus group`
+    : 'selected focus groups'
+  const inFocus: string[] = []
+  const contextual: string[] = []
+  for (const id of ids) {
+    const item = evidenceMap.get(id)
+    if (isEvidenceInFocus(item, focusSummaries)) inFocus.push(id)
+    else contextual.push(id)
+  }
+  return <div className="scoped-evidence">
+    <div className="report-evidence-group"><span>Evidence within the {scopeLabel}</span>
+      {inFocus.length ? <EvidenceList ids={inFocus} evidenceMap={evidenceMap} contradiction={contradiction} /> : <small>No cited records fall within this focus group.</small>}
+    </div>
+    {contextual.length > 0 && <div className="report-evidence-group context-evidence"><span>Additional context outside the {scopeLabel}</span><EvidenceList ids={contextual} evidenceMap={evidenceMap} contradiction={contradiction} /></div>}
+  </div>
+}
+
+function FocusWindowTable({ summary }: { summary?: EpisodeSummary }) {
+  if (!summary?.focus.window_series?.length) return null
+  const focus = summary.focus
+  const focusWindows = focus.window_series ?? []
+  const availableCount = focusWindows.filter((window) => window.available).length
+  const errorRate = focus.service_errors.error_rate
+  return <section className="focus-window-section" aria-label={`Focus group analysis for ${summary.category}`}>
+    <div className="focus-window-heading"><div><strong>Focus group · {availableCount} {availableCount === 1 ? 'window' : 'windows'}</strong><small>Shown oldest to newest. The selected window is highlighted. Times are UTC; each interval includes its start and excludes its end.</small></div><span>W{focus.start_window_index}–W{focus.end_window_index}</span></div>
+    <div className="focus-window-table-wrap"><table className="focus-window-table">
+      <thead><tr><th>Window</th><th>Exact UTC interval</th><th>Tickets (observed / expected)</th><th>Service errors</th><th>Detector</th></tr></thead>
+      <tbody>{focusWindows.map((window) => <tr className={`${window.is_focus ? 'is-focus ' : ''}${window.available ? '' : 'is-unavailable'}`} key={window.window_index}>
+        <th scope="row">W{window.window_index}{window.is_focus && <span className="focus-window-tag">Selected</span>}</th>
+        <td>{window.available && window.start_at && window.end_at ? <>{exactTimestamp(window.start_at)} – {exactTimestamp(window.end_at)}</> : 'Window data unavailable'}</td>
+        <td>{window.available ? `${window.tickets} / ${window.expected == null ? 'expected unavailable' : window.expected.toFixed(1)}` : '—'}</td>
+        <td>{!window.available ? '—' : window.service_requests ? `${window.service_errors} / ${window.service_requests} (${((window.service_error_rate ?? 0) * 100).toFixed(1)}%)` : 'No log sample'}</td>
+        <td>{!window.available ? 'Unavailable' : window.alerting ? 'Alert' : 'No alert'}</td>
+      </tr>)}</tbody>
+    </table></div>
+    <div className="focus-window-total"><strong>Across available windows:</strong> {focus.total_tickets ?? '—'} tickets / {Number(focus.expected_total ?? 0).toFixed(1)} expected ({focus.expected_window_coverage ?? 0}/{focus.available_windows} expected values) · {focus.service_errors.errors} service errors / {focus.service_errors.requests} requests{errorRate === null ? '' : ` (${(errorRate * 100).toFixed(1)}%)`}</div>
+  </section>
+}
+
 type Investigation = {
   investigation_id: string
   status: string
@@ -86,6 +180,7 @@ type Investigation = {
   report?: {
     status: string
     summary: string
+    episode_summaries?: EpisodeSummary[]
     hypotheses: Array<{
       rank: number
       title: string
@@ -263,7 +358,48 @@ function App() {
     return response.json() as Promise<T>
   }, [])
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const runId = params.get('run')
+    const investigationId = params.get('investigation')
+    if (!runId || !investigationId) return
+    let active = true
+    setBusy(true)
+    Promise.all([
+      request<Run>(`/api/runs/${encodeURIComponent(runId)}`),
+      request<Investigation>(`/api/runs/${encodeURIComponent(runId)}/investigations/${encodeURIComponent(investigationId)}`),
+      request<EventRecord[]>(`/api/runs/${encodeURIComponent(runId)}/alerts`),
+    ]).then(([savedRun, savedInvestigation, savedAlerts]) => {
+      if (!active) return
+      const summaries = savedInvestigation.report?.episode_summaries ?? []
+      const selected = summaries.flatMap((summary) => {
+        const alert = savedAlerts.find((item) => item.payload.category === summary.category
+          && Number(item.payload.window_index) === summary.focus_window_index)
+        return alert ? [alert.evidence_id] : []
+      })
+      setScenario(savedRun.scenario)
+      setSeed(savedRun.seed)
+      setArrivalModel(savedRun.arrival_model)
+      setSelectedAlertIds(selected)
+      setSelectionTouched(selected.length > 0)
+      setRun(savedRun)
+      setInvestigation(savedInvestigation)
+    }).catch((issue) => {
+      if (active) setError(issue instanceof Error ? issue.message : 'Could not open the saved investigation.')
+    }).finally(() => { if (active) setBusy(false) })
+    return () => { active = false }
+  }, [request])
+
+  useEffect(() => {
+    if (!investigation?.report || window.location.hash !== '#investigation-report') return
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById('investigation-report')?.scrollIntoView({ block: 'start' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [investigation?.investigation_id, investigation?.status])
+
   const startRun = async () => {
+    window.history.replaceState(null, '', window.location.pathname)
     setError('')
     setBusy(true)
     setEvents([])
@@ -361,9 +497,23 @@ function App() {
     setError('')
     setInvestigation(null)
     try {
-      const started = await request<Investigation>(`/api/runs/${run.run_id}/investigations`, {
-        method: 'POST', body: JSON.stringify({ question, alert_evidence_ids: effectiveSelectedAlertIds }),
+      const episodeSelections = alertEpisodes.flatMap((episode) => {
+        const focusAlert = episode.alerts.find((alert) => effectiveSelectedAlertIds.includes(alert.evidence_id))
+        return focusAlert ? [{
+          category: episode.category,
+          start_window_index: Number(episode.alerts[0].payload.window_index),
+          end_window_index: Number(episode.alerts.at(-1)?.payload.window_index),
+          focus_window_index: Number(focusAlert.payload.window_index),
+        }] : []
       })
+      const started = await request<Investigation>(`/api/runs/${run.run_id}/investigations`, {
+        method: 'POST', body: JSON.stringify({ question, episode_selections: episodeSelections }),
+      })
+      const reportUrl = new URL(window.location.href)
+      reportUrl.searchParams.set('run', run.run_id)
+      reportUrl.searchParams.set('investigation', started.investigation_id)
+      reportUrl.hash = 'investigation-report'
+      window.history.replaceState(null, '', reportUrl)
       setInvestigation(started)
     } catch (issue) {
       setError(issue instanceof Error ? issue.message : 'Could not start investigation.')
@@ -406,12 +556,24 @@ function App() {
     return () => window.clearInterval(timer)
   }, [run?.run_id, investigation?.investigation_id, investigation?.status, request])
 
+  useEffect(() => {
+    if (!run || !investigation || !investigation.report || investigation.report.episode_summaries?.length) return
+    let active = true
+    request<Investigation>(`/api/runs/${run.run_id}/investigations/${investigation.investigation_id}`)
+      .then((fresh) => {
+        if (active && fresh.report?.episode_summaries?.length) setInvestigation(fresh)
+      })
+      .catch(() => undefined)
+    return () => { active = false }
+  }, [run?.run_id, investigation?.investigation_id, investigation?.report?.episode_summaries?.length, request])
+
   const evidenceMap = new Map((investigation?.report?.evidence ?? []).map((item) => [item.evidence_id, item]))
   const runState = run?.status ?? 'ready'
   const runStateLabel = runState === 'running' ? 'Generating events' : runState === 'completed' ? 'Run complete' : runState
   const alertCategory = String(selectedAlert?.payload.category ?? 'all')
+  const focusedEpisode = selectedEpisodes.find((episode) => episode.category === alertCategory)
   const alertScore = selectedAlert
-    ? `${selectedAlert.payload.ticket_count} ${alertCategory} tickets / 30 min · expected ${Number(selectedAlert.payload.expected ?? 0).toFixed(1)}`
+    ? `${selectedAlert.payload.ticket_count} tickets in this 30-minute window · expected ${Number(selectedAlert.payload.expected ?? 0).toFixed(1)}`
     : 'Waiting for alert'
   const detectorScoreFields = (selectedAlert?.payload.signal as { scores?: Record<string, number> } | undefined)?.scores ?? {}
   const progress = investigation?.progress ?? []
@@ -425,10 +587,7 @@ function App() {
   const activitySummary = investigation?.status === 'running'
     ? (progress.at(-1)?.message ?? 'Collecting evidence from the selected incident.')
     : completedTools.length ? `Reviewed ${completedTools.join(', ').toLowerCase()}.` : 'Investigation activity is available below.'
-  const reportContext = selectedEpisodes.map((episode) => {
-    const alert = episode.alerts.find((item) => effectiveSelectedAlertIds.includes(item.evidence_id)) ?? episode.peakAlert
-    return `${episode.category} · Window ${String(alert.payload.window_index)} · ${String(alert.payload.ticket_count)} tickets / 30 min`
-  })
+  const episodeReportSummaries = report?.episode_summaries ?? []
 
   return (
     <main className="app-shell">
@@ -535,7 +694,7 @@ function App() {
             </section>
 
             <section className="panel alert-panel">
-              <div className="panel-heading"><div><div className="section-kicker">ALERT FEED</div><h2>Ticket-volume alerts</h2><p className="panel-subtitle">Select an episode to inspect it. The strongest window is selected by default.</p></div><span className={`alert-badge ${alerts.length ? 'has-alert' : ''}`}>{alerts.length ? `${alertEpisodes.length} EPISODES` : 'NO ALERTS'}</span></div>
+              <div className="panel-heading"><div><div className="section-kicker">ALERT FEED</div><h2>Ticket-volume alerts</h2><p className="panel-subtitle">Episodes group consecutive 30-minute alerts. Investigation covers the episode; choose a focus window for nearby detail.</p></div><span className={`alert-badge ${alerts.length ? 'has-alert' : ''}`}>{alerts.length ? `${alertEpisodes.length} EPISODES` : 'NO ALERTS'}</span></div>
               {alertEpisodes.length === 0 ? <div className="alert-empty"><span className="pulse-ring" />No unusual ticket-volume periods yet. Each category is monitored separately.</div> : <div className="episode-list">
                 {categories.map((category) => {
                   const episodes = alertEpisodes.filter((episode) => episode.category === category)
@@ -544,11 +703,13 @@ function App() {
                     {episodes.map((episode) => {
                       const selectedId = effectiveSelectedAlertIds.find((id) => episode.alerts.some((alert) => alert.evidence_id === id))
                       const chosen = episode.alerts.find((alert) => alert.evidence_id === selectedId) ?? episode.peakAlert
+                      const durationMinutes = episode.alerts.length * 30
+                      const duration = durationMinutes % 60 === 0 ? `${durationMinutes / 60}h` : `${Math.floor(durationMinutes / 60)}h ${durationMinutes % 60}m`
                       return <div className={`episode-row ${selectedId ? 'selected' : ''}`} key={episode.key}>
                         <label className="episode-select"><input type="checkbox" checked={Boolean(selectedId)} onChange={() => toggleEpisode(episode)} />
-                          <span><strong>W{String(episode.alerts[0].payload.window_index)}–W{String(episode.alerts.at(-1)?.payload.window_index)}</strong><small>{episode.alerts.length} alert {episode.alerts.length === 1 ? 'window' : 'windows'} · peak {String(episode.peakAlert.payload.ticket_count)} tickets</small></span>
+                          <span><strong>W{String(episode.alerts[0].payload.window_index)}–W{String(episode.alerts.at(-1)?.payload.window_index)}</strong><small>{episode.alerts.length} consecutive {episode.alerts.length === 1 ? 'window' : 'windows'} · {duration}</small><small>Strongest signal: W{String(episode.peakAlert.payload.window_index)} · {String(episode.peakAlert.payload.ticket_count)} tickets</small></span>
                         </label>
-                        <label className="episode-window">Window<select aria-label={`Selected ${category} alert window`} disabled={!selectedId} value={chosen.evidence_id} onChange={(event) => chooseEpisodeWindow(episode, event.target.value)}>{episode.alerts.map((alert) => <option key={alert.evidence_id} value={alert.evidence_id}>W{String(alert.payload.window_index)} · {String(alert.payload.ticket_count)} tickets</option>)}</select></label>
+                        <label className="episode-window">Focus<select aria-label={`Focus window for ${category} episode`} disabled={!selectedId} value={chosen.evidence_id} onChange={(event) => chooseEpisodeWindow(episode, event.target.value)}>{episode.alerts.map((alert) => <option key={alert.evidence_id} value={alert.evidence_id}>W{String(alert.payload.window_index)} · {String(alert.payload.ticket_count)} tickets</option>)}</select></label>
                       </div>
                     })}
                   </div>
@@ -558,39 +719,68 @@ function App() {
 
             <section className="panel investigator-panel">
               <div className="panel-heading"><div><div className="section-kicker">SELECTED INCIDENT</div><h2>Incident workspace</h2></div><div className="agent-orb">✳</div></div>
-              {selectedAlert ? <div className="workspace-signal"><span>Selected signal</span><strong>{alertCategory} · Window {String(selectedAlert.payload.window_index)}</strong><p>{alertScore}</p><details className="detection-details"><summary>Detection details</summary><div className="detector-tags">{(selectedAlert.payload.detectors_triggered as string[] ?? []).map((detector) => <span key={detector}>{detector.replaceAll('_', ' ')}</span>)}</div><div className="detector-values">{Object.entries(detectorScoreFields).map(([name, value]) => <span key={name}>{name.replaceAll('_', ' ')} <b>{Number(value).toFixed(2)}</b></span>)}</div></details></div> : <div className="workspace-empty">Select an alert episode to review its evidence and investigate the likely cause.</div>}
-              <div className="investigator-prompt"><div className="prompt-avatar">AR</div><div><strong>Operator question</strong><small>Investigate {effectiveSelectedAlertIds.length || 'the selected'} alert {effectiveSelectedAlertIds.length === 1 ? 'episode' : 'episodes'} using available evidence.</small></div></div>
-              <div className="ask-row"><input value={question} onChange={(event) => setQuestion(event.target.value)} disabled={!effectiveSelectedAlertIds.length || investigation?.status === 'running'} aria-label="Question for investigator" /><button className="ask-button" onClick={investigate} disabled={!effectiveSelectedAlertIds.length || !question.trim() || investigation?.status === 'running'}>{investigation?.status === 'running' ? 'Investigating…' : 'Investigate'}</button></div>
-              {!effectiveSelectedAlertIds.length && <div className="investigator-hint">Select one or more alert episodes to start an investigation.</div>}
+              {selectedAlert && focusedEpisode ? <div className="workspace-signal"><span>Selected episode · {focusedEpisode.alerts.length} consecutive windows</span><strong>{alertCategory} · W{String(focusedEpisode.alerts[0].payload.window_index)}–W{String(focusedEpisode.alerts.at(-1)?.payload.window_index)}</strong><p>Strongest detector signal: W{String(focusedEpisode.peakAlert.payload.window_index)} · {String(focusedEpisode.peakAlert.payload.ticket_count)} tickets</p><p>Focus window: W{String(selectedAlert.payload.window_index)} · {alertScore}</p><details className="detection-details"><summary>Detector details for focus window</summary><div className="detector-tags">{(selectedAlert.payload.detectors_triggered as string[] ?? []).map((detector) => <span key={detector}>{detector.replaceAll('_', ' ')}</span>)}</div><div className="detector-values">{Object.entries(detectorScoreFields).map(([name, value]) => <span key={name}>{name.replaceAll('_', ' ')} <b>{Number(value).toFixed(2)}</b></span>)}</div></details></div> : <div className="workspace-empty">Select an alert episode to review its evidence and investigate the likely cause.</div>}
+              <div className="investigator-prompt"><div className="prompt-avatar">AR</div><div><strong>Operator question</strong><small>The investigator compares the selected window with up to two earlier windows and one later window, when available. The full episode and earlier records provide context.</small></div></div>
+              <div className="ask-row"><input value={question} onChange={(event) => setQuestion(event.target.value)} disabled={!effectiveSelectedAlertIds.length || investigation?.status === 'running'} aria-label="Question for investigator" /><button className="ask-button" onClick={investigate} disabled={!effectiveSelectedAlertIds.length || !question.trim() || investigation?.status === 'running'}>{investigation?.status === 'running' ? 'Investigating…' : effectiveSelectedAlertIds.length > 1 ? 'Investigate episodes' : 'Investigate episode'}</button></div>
+              {!effectiveSelectedAlertIds.length && <div className="investigator-hint">Select an episode to start an investigation. Choose one episode per category.</div>}
               {progress.length > 0 && <details className="investigation-progress" open={investigation?.status === 'running'} aria-live="polite"><summary className="progress-heading"><strong>{investigation?.status === 'running' ? 'Investigation in progress' : 'Investigation activity'}</strong><span>{progress.length} updates</span></summary><p className="activity-summary">{activitySummary}</p><div className="progress-detail-list">{progress.filter((step) => !step.tool || !step.type.includes('started')).map((step) => <div className={`progress-step ${step.type}`} key={step.sequence}><i />{step.tool ? <><strong>{investigationToolLabels[step.tool] ?? step.tool.replaceAll('_', ' ')}</strong><span>{step.type.includes('completed') ? step.message : 'Checking evidence…'}</span></> : <span>{step.message}</span>}</div>)}</div></details>}
               {investigation?.status === 'failed' && <div className="investigation-error">{investigation.error || 'Investigation failed. Check API key or select offline demo mode.'}</div>}
             </section>
           </div>
 
-          {report && <section className="panel rca-report">
+          {report && <section id="investigation-report" className="panel rca-report">
             <div className="report-heading"><div><div className="section-kicker">INVESTIGATION REPORT</div><h2>What we found</h2></div><span className={`report-status ${report.status}`}>{report.status === 'completed' ? 'LIKELY EXPLANATION' : report.status === 'incomplete' ? 'PARTIAL FINDING' : 'NOT ENOUGH EVIDENCE'}</span></div>
-            <div className="report-context">{reportContext.map((item) => <span key={item}>{item}</span>)}</div>
+            {!episodeReportSummaries.length && <div className="investigation-error">The report's window summary is unavailable. Refresh it after restarting the API. <button type="button" onClick={async () => {
+              if (!run || !investigation) return
+              try {
+                const fresh = await request<Investigation>(`/api/runs/${run.run_id}/investigations/${investigation.investigation_id}`)
+                setInvestigation(fresh)
+                if (!fresh.report?.episode_summaries?.length) setError('The API did not return a window summary. Check that only one API server is running with the current code.')
+              } catch (issue) {
+                setError(issue instanceof Error ? issue.message : 'Could not refresh the report.')
+              }
+            }}>Refresh window summary</button></div>}
+            <div className="episode-context-label">FULL EPISODE CONTEXT · These totals describe the entire selected alert episode.</div>
+            <div className="episode-overview-grid">{episodeReportSummaries.map((item) => <article className="episode-overview" key={`${item.category}-${item.start_window_index}`}>
+              <div className="episode-overview-heading"><strong>{item.category}</strong><span>W{item.start_window_index}–W{item.end_window_index}</span></div>
+              <p>{item.alert_window_count} consecutive windows · {item.duration_minutes % 60 === 0 ? `${item.duration_minutes / 60}h` : `${Math.floor(item.duration_minutes / 60)}h ${item.duration_minutes % 60}m`}</p>
+              <div className="episode-overview-metrics"><span><small>Tickets in episode</small><b>{item.total_tickets} / {item.expected_total.toFixed(1)} expected</b></span><span><small>Prior equal-length period</small><b>{item.baseline.average_tickets_per_window === null ? 'Unavailable' : `${item.baseline.average_tickets_per_window.toFixed(1)} tickets / 30 min`}</b></span><span><small>Service error rate</small><b>{item.service_errors.episode.error_rate === null ? 'No log data' : `${(item.service_errors.episode.error_rate * 100).toFixed(1)}%`}{item.service_errors.baseline.error_rate === null ? '' : ` vs ${(item.service_errors.baseline.error_rate * 100).toFixed(1)}% before`}</b></span></div>
+              <div className="episode-focus-summary">Focus group: {item.focus.available_windows} {item.focus.available_windows === 1 ? 'window' : 'windows'} · W{item.focus.start_window_index}–W{item.focus.end_window_index} · selected W{item.focus_window_index} · strongest episode signal W{item.strongest_window.window_index}</div>
+              {(item.baseline.missing_windows || item.expected_window_coverage < item.alert_window_count) && <small className="episode-coverage-note">Some baseline or expected values are unavailable; comparisons use recorded windows only.</small>}
+            </article>)}</div>
             {(reportFindings.length > 1 || report.hypotheses.length === 0) && <p className="report-summary">{report.summary}</p>}
             <div className="report-findings">{reportFindings.map((finding) => {
+              const focusSummary = episodeReportSummaries.find((item) => item.category === finding.category)
               const hypotheses = report.hypotheses.filter((hypothesis) => (hypothesis.categories ?? [selectedEpisodes[0]?.category]).includes(finding.category) && (hypothesis.categories?.length ?? 0) <= 1)
               const showFindingSummary = finding.summary && (reportFindings.length > 1 || hypotheses.length === 0)
               const uniqueQuestions = finding.unresolved_questions.filter((item) => !report.unresolved_questions.includes(item))
               return <section className="category-finding" key={finding.category}>
                 <div className="category-finding-heading"><h3>{finding.category}</h3><span className={`finding-status ${finding.status}`}>{finding.status === 'completed' ? 'REVIEWED' : finding.status.replaceAll('_', ' ').toUpperCase()}</span></div>
                 {showFindingSummary && <p>{finding.summary}</p>}
+                <FocusWindowTable summary={focusSummary} />
                 {hypotheses.map((hypothesis) => <article className="hypothesis" key={`${finding.category}-${hypothesis.rank}-${hypothesis.title}`}>
-                  <div className="hypothesis-rank">{hypothesis.rank === 1 ? 'LEAD' : `#${hypothesis.rank}`}</div><div className="hypothesis-main"><h3>{hypothesis.title}</h3><p>{hypothesis.explanation}</p>
-                    <div className="report-evidence-group"><span>Supporting evidence</span><EvidenceList ids={hypothesis.supporting_evidence} evidenceMap={evidenceMap} /></div>
-                    {hypothesis.contradicting_evidence.length > 0 && <div className="report-evidence-group contrary-group"><span>Evidence that does not fit</span><EvidenceList ids={hypothesis.contradicting_evidence} evidenceMap={evidenceMap} contradiction /> </div>}
+                  <div className="hypothesis-rank">{hypothesis.rank === 1 ? 'JOINT LEAD' : `#${hypothesis.rank}`}</div><div className="hypothesis-main"><h3>{hypothesis.title}</h3><p>{hypothesis.explanation}</p>
+                    <div className="report-evidence-group"><span>Supporting evidence by scope</span><ScopedEvidenceList ids={hypothesis.supporting_evidence} evidenceMap={evidenceMap} focusSummaries={focusSummary ? [focusSummary] : []} /></div>
+                    {hypothesis.contradicting_evidence.length > 0 && <div className="report-evidence-group contrary-group"><span>Evidence that does not fit</span><ScopedEvidenceList ids={hypothesis.contradicting_evidence} evidenceMap={evidenceMap} focusSummaries={focusSummary ? [focusSummary] : []} contradiction /> </div>}
                   </div>
                 </article>)}
                 {uniqueQuestions.map((item) => <div className="unresolved" key={item}><strong>What remains unknown</strong><p>{item}</p></div>)}
               </section>
             })}</div>
-            {report.hypotheses.filter((hypothesis) => (hypothesis.categories?.length ?? 0) > 1).length > 0 && <section className="shared-findings"><h3>Possible shared causes</h3>{report.hypotheses.filter((hypothesis) => (hypothesis.categories?.length ?? 0) > 1).map((hypothesis) => <article className="hypothesis" key={`shared-${hypothesis.rank}-${hypothesis.title}`}><div className="hypothesis-main"><h3>{hypothesis.title}</h3><p>{hypothesis.explanation}</p><small>Affects: {hypothesis.categories?.join(', ')}</small><div className="report-evidence-group"><span>Supporting evidence</span><EvidenceList ids={hypothesis.supporting_evidence} evidenceMap={evidenceMap} /></div></div></article>)}</section>}
+            {report.hypotheses.filter((hypothesis) => (hypothesis.categories?.length ?? 0) > 1).length > 0 && <section className="shared-findings"><h3>Possible shared causes</h3>{report.hypotheses.filter((hypothesis) => (hypothesis.categories?.length ?? 0) > 1).map((hypothesis) => {
+              const categorySummaries = episodeReportSummaries.filter((item) => hypothesis.categories?.includes(item.category))
+              return <article className="hypothesis" key={`shared-${hypothesis.rank}-${hypothesis.title}`}><div className="hypothesis-main"><h3>{hypothesis.title}</h3><p>{hypothesis.explanation}</p><small>Affects: {hypothesis.categories?.join(', ')}</small><div className="report-evidence-group"><span>Supporting evidence by scope</span><ScopedEvidenceList ids={hypothesis.supporting_evidence} evidenceMap={evidenceMap} focusSummaries={categorySummaries} /></div></div></article>
+            })}</section>}
             {reportQuestions.length > 0 && <section className="unresolved report-unknown"><strong>What remains unknown</strong>{reportQuestions.map((item) => <p key={item}>{item}</p>)}</section>}
-            {(report.recommendations ?? []).length > 0 && <section className="recommendations"><div className="recommendation-heading"><h3>Recommended next step</h3><span>ADVISORY ONLY</span></div>{(report.recommendations ?? []).map((item) => <article className="recommendation" key={`${item.category}-${item.runbook_id ?? item.title}`}><strong>{item.title}</strong><p>{item.next_step}</p><small><b>Verify:</b> {item.verification}</small>{item.supporting_evidence.length > 0 && <div className="report-evidence-group"><span>Based on</span><EvidenceList ids={item.supporting_evidence} evidenceMap={evidenceMap} /></div>}</article>)}</section>}
-            <details className="evidence-details"><summary>All evidence records · {report.evidence.length}</summary><div>{report.evidence.map((item) => <article key={item.evidence_id}><strong>{evidenceSourceLabels[item.source] ?? 'Evidence record'} · {timeLabel(item.observed_at)}</strong><small>{evidenceSourceDescriptions[item.source] ?? 'Evidence used in this investigation.'}</small><p>{item.summary}</p><details className="technical-details"><summary>Technical details</summary><code>{item.evidence_id}</code></details></article>)}</div></details>
+            {(report.recommendations ?? []).length > 0 && <section className="recommendations"><div className="recommendation-heading"><h3>Recommended next step</h3><span>ADVISORY ONLY</span></div>{(report.recommendations ?? []).map((item) => <article className="recommendation" key={`${item.category}-${item.runbook_id ?? item.title}`}><strong>{item.title}</strong><p>{item.next_step}</p><small><b>Verify:</b> {item.verification}</small>{item.supporting_evidence.length > 0 && <div className="report-evidence-group"><span>Based on evidence by scope</span><ScopedEvidenceList ids={item.supporting_evidence} evidenceMap={evidenceMap} focusSummaries={episodeReportSummaries.filter((summary) => summary.category === item.category)} /></div>}</article>)}</section>}
+            <details className="evidence-details"><summary>All evidence records · {report.evidence.length}</summary>
+              {[
+                { label: 'Within the selected focus groups', records: report.evidence.filter((item) => isEvidenceInFocus(item, episodeReportSummaries)) },
+                { label: 'Additional context outside the selected focus groups', records: report.evidence.filter((item) => !isEvidenceInFocus(item, episodeReportSummaries)) },
+              ].filter((group) => group.records.length > 0).map((group) => <section className="all-evidence-group" key={group.label}>
+                <h3>{group.label}</h3><div>{group.records.map((item) => <article key={item.evidence_id}><strong>{evidenceSourceLabels[item.source] ?? 'Evidence record'} · {timeLabel(item.observed_at)}</strong><small>{evidenceSourceDescriptions[item.source] ?? 'Evidence used in this investigation.'}</small><p>{item.summary}</p><details className="technical-details"><summary>Technical details</summary><code>{item.evidence_id}</code></details></article>)}</div>
+              </section>)}
+            </details>
             <details className="trace-details"><summary>Technical investigation trace · {report.tool_trace.length} results</summary><div className="trace-list">{report.tool_trace.map((item, index) => <div key={`${item.tool}-${index}`}><code>{item.tool}</code><pre>{JSON.stringify(item.result, null, 2)}</pre></div>)}</div></details>
           </section>}
 

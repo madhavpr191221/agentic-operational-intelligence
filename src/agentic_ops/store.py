@@ -130,7 +130,8 @@ class EventStore:
         return [self._event(row) for row in rows]
 
     def search_events(self, run_id: str, sources: tuple[str, ...], query: str = "", limit: int = 30,
-                      event_types: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+                      event_types: tuple[str, ...] = (), start_at: str | None = None,
+                      end_at: str | None = None) -> list[dict[str, Any]]:
         if not sources:
             return []
         source_slots = ",".join("?" for _ in sources)
@@ -140,6 +141,12 @@ class EventStore:
             type_slots = ",".join("?" for _ in event_types)
             sql += f" AND event_type IN ({type_slots})"
             params.extend(event_types)
+        if start_at is not None:
+            sql += " AND simulated_at>=?"
+            params.append(start_at)
+        if end_at is not None:
+            sql += " AND simulated_at<=?"
+            params.append(end_at)
         sql += " ORDER BY sequence DESC LIMIT ?"
         params.append(min(max(limit * 8, 1), 1000))
         with self._connection() as connection:

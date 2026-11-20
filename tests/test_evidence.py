@@ -34,8 +34,12 @@ class EvidenceTests(unittest.TestCase):
                              {"ticket_key": "SUP-1", "title": "Payment failed", "category": "payments"})
         self.store.add_event(self.run_id, "2026-01-01T00:00:00Z", "change_log", "change_record",
                              {"change_key": "CHG-1", "service": "checkout-payments"})
+        self._add_window(0, "2026-01-01T00:00:00Z", "2026-01-01T00:30:00Z", 1)
+        self.store.add_event(self.run_id, "2026-01-01T00:30:00Z", "detector", "anomaly_alert",
+                             {"category": "payments", "window_index": 0, "ticket_count": 1})
         tools = EvidenceTools(self.store)
-        report = MockInvestigator().investigate(self.run_id, "What happened?", tools)
+        report = MockInvestigator().investigate(self.run_id, "What happened?", tools,
+                                                {"category": "payments", "window_index": 0})
         cited = set(report.hypotheses[0].supporting_evidence)
         available = {item.evidence_id for item in report.evidence}
         self.assertEqual(report.status, "completed")
@@ -79,7 +83,8 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(stamps, sorted(stamps))
         self.assertEqual(before_after["before"]["ticket_count_total"], 1)
         self.assertEqual(before_after["before"]["ticket_count"], 1)
-        self.assertTrue(before_after["before"]["missing_windows"])
+        self.assertEqual(before_after["before_minutes"], 30)
+        self.assertFalse(before_after["before"]["missing_windows"])
         self.assertEqual(before_after["during"]["ticket_count"], 1)
         self.assertEqual(before_after["during"]["service"]["error_rate"], 0.4)
 

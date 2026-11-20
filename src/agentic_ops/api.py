@@ -24,10 +24,18 @@ class RunRequest(BaseModel):
     speed: Speed = "normal"
 
 
+class EpisodeSelection(BaseModel):
+    category: str
+    start_window_index: int = Field(ge=0)
+    end_window_index: int = Field(ge=0)
+    focus_window_index: int = Field(ge=0)
+
+
 class InvestigationRequest(BaseModel):
     question: str = Field(min_length=3, max_length=1000)
     alert_evidence_id: str | None = None
     alert_evidence_ids: list[str] | None = Field(default=None, min_length=1, max_length=4)
+    episode_selections: list[EpisodeSelection] | None = Field(default=None, min_length=1, max_length=4)
 
 
 def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
@@ -119,7 +127,9 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
     def investigate(run_id: str, request: InvestigationRequest) -> dict:
         try:
             return app.state.runtime.start_investigation(
-                run_id, request.question, request.alert_evidence_id, request.alert_evidence_ids
+                run_id, request.question, request.alert_evidence_id, request.alert_evidence_ids,
+                [selection.model_dump() for selection in request.episode_selections]
+                if request.episode_selections else None,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -128,7 +138,7 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
 
     @app.get("/api/runs/{run_id}/investigations/{investigation_id}")
     def get_investigation(run_id: str, investigation_id: str) -> dict:
-        result = app.state.runtime.store.get_investigation(investigation_id)
+        result = app.state.runtime.get_investigation(investigation_id)
         if result is None or result["run_id"] != run_id:
             raise HTTPException(status_code=404, detail="Unknown investigation")
         return result

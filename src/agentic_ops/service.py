@@ -183,36 +183,85 @@ class OperationsRuntime:
 
     def start_investigation(self, run_id: str, question: str,
                             alert_evidence_id: str | None = None,
-                            alert_evidence_ids: list[str] | None = None) -> dict[str, Any]:
+                            alert_evidence_ids: list[str] | None = None,
+                            episode_selections: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         if self.store.get_run(run_id) is None:
             raise KeyError("Unknown run")
         alerts = self.store.search_events(run_id, ("detector",), limit=1000,
                                           event_types=("anomaly_alert",))
+        if episode_selections and (alert_evidence_id or alert_evidence_ids):
+            raise ValueError("Use episode_selections or legacy alert evidence IDs, not both")
         if alert_evidence_id and alert_evidence_ids:
             raise ValueError("Use either alert_evidence_id or alert_evidence_ids, not both")
-        selected_ids = alert_evidence_ids or ([alert_evidence_id] if alert_evidence_id else [])
-        if selected_ids:
-            if len(selected_ids) > len(CATEGORIES) or len(set(selected_ids)) != len(selected_ids):
-                raise ValueError("Select one distinct alert episode for at most four categories")
-            alerts_by_id = {event["evidence_id"]: event for event in alerts}
-            selected_alerts = [alerts_by_id.get(evidence_id) for evidence_id in selected_ids]
-            if any(alert is None for alert in selected_alerts):
-                raise ValueError("Every selected alert must belong to this run")
-            selected_categories = [str(alert["payload"].get("category", "")) for alert in selected_alerts]
+        alerts_by_id = {event["evidence_id"]: event for event in alerts}
+        selections: list[dict[str, Any]] = []
+        if episode_selections:
+            if len(episode_selections) > len(CATEGORIES):
+                raise ValueError("Select at most one episode for each of four categories")
+            selected_categories = [str(item.get("category", "")) for item in episode_selections]
             if any(category not in CATEGORIES for category in selected_categories):
-                raise ValueError("A selected alert has an unsupported category")
+                raise ValueError("An episode has an unsupported category")
             if len(set(selected_categories)) != len(selected_categories):
                 raise ValueError("Select no more than one alert episode per category")
+            for item in episode_selections:
+                category = str(item["category"])
+                start_index = int(item["start_window_index"])
+                end_index = int(item["end_window_index"])
+                focus_index = int(item["focus_window_index"])
+                if start_index > end_index or not start_index <= focus_index <= end_index:
+                    raise ValueError("Episode bounds must contain the selected focus window")
+                category_alerts = sorted(
+                    (alert for alert in alerts if alert["payload"].get("category") == category),
+                    key=lambda alert: int(alert["payload"]["window_index"]))
+                indices = [int(alert["payload"]["window_index"]) for alert in category_alerts]
+                requested = list(range(start_index, end_index + 1))
+                if [index for index in indices if start_index <= index <= end_index] != requested:
+                    raise ValueError("Episode bounds must match a continuous run of alert windows")
+                if start_index - 1 in indices or end_index + 1 in indices:
+                    raise ValueError("Episode bounds must include every consecutive alert window")
+                focus_alert = next((alert for alert in category_alerts
+                                    if int(alert["payload"]["window_index"]) == focus_index), None)
+                if focus_alert is None:
+                    raise ValueError("Focus window must be an alert window in the selected episode")
+                selections.append({"category": category, "start_window_index": start_index,
+                                   "end_window_index": end_index, "focus_window_index": focus_index,
+                                   "focus_alert": focus_alert})
         else:
-            selected_alerts = [alerts[-1]] if alerts else []
+            selected_ids = alert_evidence_ids or ([alert_evidence_id] if alert_evidence_id else [])
+            if selected_ids:
+                if len(selected_ids) > len(CATEGORIES) or len(set(selected_ids)) != len(selected_ids):
+                    raise ValueError("Select one alert window per category, up to four categories")
+                selected_alerts = [alerts_by_id.get(evidence_id) for evidence_id in selected_ids]
+                if any(alert is None for alert in selected_alerts):
+                    raise ValueError("Every selected alert must belong to this run")
+                selected_categories = [str(alert["payload"].get("category", "")) for alert in selected_alerts]
+                if any(category not in CATEGORIES for category in selected_categories):
+                    raise ValueError("A selected alert has an unsupported category")
+                if len(set(selected_categories)) != len(selected_categories):
+                    raise ValueError("Select no more than one alert episode per category")
+            else:
+                selected_alerts = [alerts[-1]] if alerts else []
+            for alert in selected_alerts:
+                index = int(alert["payload"]["window_index"])
+                selections.append({"category": str(alert["payload"]["category"]),
+                                   "start_window_index": index, "end_window_index": index,
+                                   "focus_window_index": index, "focus_alert": alert})
         investigation_id = self.store.create_investigation(run_id, question)
-        selected_signals = [
-            {"evidence_id": alert["evidence_id"], "simulated_at": alert["simulated_at"],
-             **alert["payload"]}
-            for alert in selected_alerts
-        ]
+        selected_signals = []
+        for selection in selections:
+            summary = self.evidence.build_episode_summary(
+                run_id, selection["category"], selection["start_window_index"],
+                selection["end_window_index"], selection["focus_window_index"])
+            alert = selection["focus_alert"]
+            selected_signals.append({
+                "evidence_id": alert["evidence_id"], "simulated_at": alert["simulated_at"],
+                **alert["payload"], "episode_start_window_index": selection["start_window_index"],
+                "episode_end_window_index": selection["end_window_index"],
+                "focus_window_index": selection["focus_window_index"], "episode_summary": summary,
+            })
         context = ({"selected_signals": selected_signals,
                     "categories": [signal["category"] for signal in selected_signals],
+                    "episode_summaries": [signal["episode_summary"] for signal in selected_signals],
                     **(selected_signals[0] if len(selected_signals) == 1 else {})}
                    if selected_signals else None)
         worker = threading.Thread(target=self._investigate,
@@ -229,6 +278,15 @@ class OperationsRuntime:
                 run_id, question, self.evidence, alert_context,
                 on_progress=lambda event: self.store.add_investigation_event(investigation_id, event),
             )
+            # Persist the deterministic scope summary with every outcome. Some investigator
+            # paths (for example, an evidence-free abstention) return before composing it.
+            canonical_summaries = [
+                signal["episode_summary"]
+                for signal in (alert_context or {}).get("selected_signals", [])
+                if isinstance(signal.get("episode_summary"), dict)
+            ]
+            if canonical_summaries:
+                report.episode_summaries = canonical_summaries
             self.store.set_investigation(investigation_id, report.status, report.to_dict())
         except Exception as exc:
             self.store.add_investigation_event(
@@ -236,6 +294,83 @@ class OperationsRuntime:
                 {"type": "failed", "stage": "failed", "message": "The investigation could not be completed."},
             )
             self.store.set_investigation(investigation_id, "failed", error=str(exc))
+
+    def get_investigation(self, investigation_id: str) -> dict[str, Any] | None:
+        """Return an investigation, backfilling deterministic summaries for older reports."""
+        investigation = self.store.get_investigation(investigation_id)
+        if investigation is None:
+            return None
+        report = investigation.get("report")
+        if not isinstance(report, dict) or report.get("episode_summaries"):
+            return investigation
+
+        categories = list(dict.fromkeys(
+            str(item.get("category")) for item in report.get("category_findings", [])
+            if isinstance(item, dict) and item.get("category") in CATEGORIES
+        ))
+        if not categories:
+            return investigation
+
+        trace = report.get("tool_trace", [])
+        summaries = []
+        alerts = self.store.search_events(investigation["run_id"], ("detector",), limit=1000,
+                                          event_types=("anomaly_alert",))
+        alerts_by_category: dict[str, set[int]] = {}
+        for alert in alerts:
+            category = alert["payload"].get("category")
+            if category in categories:
+                alerts_by_category.setdefault(str(category), set()).add(
+                    int(alert["payload"]["window_index"]))
+
+        for category in categories:
+            category_indices: list[int] = []
+            fallback_indices: list[int] = []
+            for entry in trace if isinstance(trace, list) else []:
+                if not isinstance(entry, dict):
+                    continue
+                result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+                arguments = entry.get("arguments") if isinstance(entry.get("arguments"), dict) else {}
+                index_value = next((source.get(key) for source in (result, arguments)
+                                    for key in ("focus_window_index", "window_index")
+                                    if source.get(key) is not None), None)
+                if index_value is None:
+                    continue
+                try:
+                    index = int(index_value)
+                except (TypeError, ValueError):
+                    continue
+                entry_category = result.get("category") or arguments.get("category")
+                if entry_category == category:
+                    category_indices.append(index)
+                elif entry.get("tool") == "compare_categories" and any(
+                        isinstance(item, dict) and item.get("category") == category
+                        for item in result.get("categories", [])):
+                    fallback_indices.append(index)
+
+            candidate_indices = category_indices or (
+                fallback_indices if len(set(fallback_indices)) == 1 else [])
+            focus_index = next((index for index in reversed(candidate_indices)
+                                if index in alerts_by_category.get(category, set())), None)
+            if focus_index is None:
+                continue
+            alert_indices = alerts_by_category[category]
+            start_index = end_index = focus_index
+            while start_index - 1 in alert_indices:
+                start_index -= 1
+            while end_index + 1 in alert_indices:
+                end_index += 1
+            try:
+                summaries.append(self.evidence.build_episode_summary(
+                    investigation["run_id"], category, start_index, end_index, focus_index))
+            except (KeyError, ValueError):
+                continue
+
+        if summaries:
+            report["episode_summaries"] = summaries
+            self.store.set_investigation(investigation_id, investigation["status"], report,
+                                         investigation.get("error"))
+            investigation["report"] = report
+        return investigation
 
     def wait_for_run(self, run_id: str, timeout: float = 10.0) -> dict[str, Any] | None:
         with self._lock:
