@@ -11,7 +11,8 @@ A local, fictional operations-intelligence demo that detects category-specific s
 - Deterministic investigator tools compare categories, rank ticket reasons/channels, build an incident timeline, and compare before/after ticket and service-error rates.
 - Evidence-grounded fictional runbook suggestions include a verification check and never execute operational changes.
 - Empirically calibrated category-specific detector thresholds and held-out detector evaluation.
-- Four small-multiple category charts with independent scales, alert episodes, selectable representative windows, event timelines, investigation activity, category-level cited reports, and light/dark themes.
+- Four category charts, consecutive alert episodes, selectable focus windows, event timelines, category reports, and light/dark themes.
+- Joint focus-window analysis in chronological order: T-2, T-1, T, and T+1 when available, with exact UTC intervals, ticket counts, service errors, and scoped citations.
 
 All records are generated locally from a reproducible seed. No external incident data is needed.
 
@@ -29,10 +30,10 @@ Install the locked Python dependencies:
 uv sync --locked
 ```
 
-In the first terminal, start the backend:
+In the first PowerShell terminal, from the repository root, start the API on `127.0.0.1:8000`:
 
 ```powershell
-uv run uvicorn agentic_ops.api:app --reload --app-dir src
+uv run python -m uvicorn agentic_ops.api:app --app-dir src --host 127.0.0.1 --port 8000
 ```
 
 For live investigations, copy `.env.example` to `.env` and set `OPENAI_API_KEY` in `.env`. OpenAI investigation is the default; clear any mock-mode setting in the current PowerShell session before starting the backend:
@@ -47,20 +48,49 @@ For offline mock investigations, set the mode before starting the backend:
 
 ```powershell
 $env:AGENT_MODE = "mock"
-uv run uvicorn agentic_ops.api:app --reload --app-dir src
+uv run python -m uvicorn agentic_ops.api:app --app-dir src
 ```
 
 The live workflow uses one OpenAI Agents SDK agent with a bounded adaptive tool loop, followed by one structured report-composition pass with no tools. The offline mock demonstrates the same report and activity UI without calling a model.
 
-In a second terminal, start the web interface:
+In a second PowerShell terminal, start the web interface. Vite serves it at `http://127.0.0.1:5173/` and proxies `/api` requests to the backend on port `8000`:
 
 ```powershell
-cd web
+Set-Location web
 npm ci
-npm run dev
+npm run dev -- --host 127.0.0.1
 ```
 
-Open the local URL printed by Vite. Choose a scenario and start a run. The **LOCAL SIMULATOR** label means the event data is synthetic and generated locally; the investigator calls OpenAI when you submit an investigation. Compare the four category charts, then in **Alert episodes** select one episode per category. The strongest alert window is preselected; use its window menu to choose another alert in that episode. Click **Investigate** to send the selected category signals to the investigator. The report gives a separate finding for each selected category and can abstain when the evidence does not establish a cause. Inspect the synthetic message bodies in **Latest support tickets** and open **Evidence records** to review the text behind citations. Suggested next steps are advisory only and include checks for verifying recovery.
+Open `http://127.0.0.1:5173/`. Keep both terminals running while using the app. Choose a scenario and start a run. The **LOCAL SIMULATOR** label describes the synthetic event data; the investigator calls OpenAI when you submit an investigation.
+
+1. Compare the category charts and select an episode in **Ticket-volume alerts**. Each episode groups consecutive 30-minute alerts. Select one episode per category.
+2. Choose a focus window; the strongest signal is selected by default. The investigator compares T-2, T-1, T, and T+1 when available, using the full episode and earlier records as context. At the end of a completed run, selecting W143 includes W141, W142, and W143.
+3. Click **Investigate episode**. The report lists exact UTC intervals and counts, a joint finding, supporting evidence, remaining questions, and suggested next steps. Each interval includes its start and excludes its end.
+4. Open evidence records to inspect customer messages and service events. Recommendations are advisory; the app does not execute operational changes.
+
+If a saved report predates the focus-window summary, refresh the page after the updated API is running. The API can rebuild the summary from stored run events; you do not need to rerun the simulation or investigation.
+
+Investigation links include `?run=<run-id>&investigation=<investigation-id>#investigation-report`. Bookmark the URL after starting an investigation to reopen its saved report and charts. Opening a saved report does not call OpenAI again.
+
+Run one API instance at a time. The command above runs without automatic reload. After backend edits, stop it with Ctrl+C and start it again. On Windows, forcibly closing a reloading server can leave its child worker running with older code; starting another server can then serve inconsistent report formats on the same port.
+
+### Stop or restart an existing server
+
+Press **Ctrl+C** in the terminal running the server. If that terminal is unavailable, stop the process listening on the API port:
+
+```powershell
+Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty OwningProcess -Unique |
+    ForEach-Object { Stop-Process -Id $_ -Force }
+```
+
+To stop the UI instead, use `5173` in place of `8000`. Check the port before restarting; no output means no listener was found:
+
+```powershell
+Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
+```
+
+Restart with the API or UI command above. These commands stop the listener on the selected port; confirm it belongs to this app if you use that port for other projects.
 
 If uv cannot initialize its default cache on Windows, use the ignored project-local cache before running uv:
 
@@ -87,13 +117,13 @@ npm run build
 
 The detector evaluator reports per-category payment-signal recall, false-alert episodes per simulated day, and detection delay across held-out synthetic seeds and arrival assumptions. See [the RCA evaluation design](docs/experiments/002-rca-agent-evaluation.md) for the investigator rubric and control cases.
 
-Run a small live RCA evaluation with one model call per scenario (payment cause plus three controls):
+Run a small live RCA evaluation with one investigation per scenario (payment cause plus three controls):
 
 ```powershell
 uv run python scripts/evaluate_rca.py --seed-count 1
 ```
 
-This requires the OpenAI key and makes live model calls. Increase `--seed-count` for a broader estimate; the script reports evidence support, unsupported control claims, valid citations, tool calls, and duration.
+This requires the OpenAI key and API credits. Each investigation can make multiple model calls. Increase `--seed-count` for a broader estimate; the script reports evidence support, unsupported control claims, valid citations, tool calls, and duration.
 
 ## Project layout
 

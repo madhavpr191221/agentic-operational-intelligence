@@ -6,7 +6,17 @@ Python backend code lives in `src/agentic_ops/`; tests are in `tests/`. The Reac
 
 ## Build, Test, and Development Commands
 
-Set `UV_CACHE_DIR` to a writable user cache directory if uv's default cache path is unusable, then sync with `uv sync`; run checks with `uv run pytest`. Start the backend with `uv run uvicorn agentic_ops.api:app --reload --app-dir src`. Start the UI from `web/` with `npm install` and `npm run dev`. Once a lockfile is present, use `uv sync --locked` for reproducible installs. The backend reads only `OPENAI_API_KEY` from the ignored root `.env` when an investigation is requested; use `AGENT_MODE=mock` for an offline deterministic demo.
+From the repository root, sync dependencies with `uv sync --locked` and start the API with `uv run python -m uvicorn agentic_ops.api:app --app-dir src --host 127.0.0.1 --port 8000`. In a second terminal, run `Set-Location web`, `npm ci` (first install), then `npm run dev -- --host 127.0.0.1`; open `http://127.0.0.1:5173/`. Keep both servers running; Vite proxies API requests to port 8000. Set `UV_CACHE_DIR` to a writable user cache directory if uv's default cache path is unusable. The backend reads only `OPENAI_API_KEY` from the ignored root `.env` when an investigation is requested; use `AGENT_MODE=mock` only for an offline deterministic demo.
+
+Run one API instance without automatic reload. Stop it with Ctrl+C before restarting after backend edits. If its terminal is unavailable, stop the API listener with:
+
+```powershell
+Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty OwningProcess -Unique |
+    ForEach-Object { Stop-Process -Id $_ -Force }
+```
+
+Use port `5173` for the UI. Verify the selected port is free before restarting; avoid terminating unrelated project processes. Saved investigation URLs reopen reports without another OpenAI call.
 
 ## Coding Style & Naming Conventions
 
@@ -18,7 +28,7 @@ Place Python tests under `tests/` as `test_*.py`. Cover seeded simulation, stati
 
 ## Commit & Pull Request Guidelines
 
-Git history is unavailable in this checkout, so no repository-specific commit convention can be confirmed. Use concise imperative commit subjects (for example, `Add rate detector boundary tests`). Pull requests should explain the behavior changed, evidence or tests run, and any impact on generated data or statistical outputs. Include a linked issue or screenshots only when relevant; none are established as mandatory here.
+History uses concise imperative subjects, sometimes with a `feat:` prefix. Follow that style (for example, `Add rate detector boundary tests`). Pull requests should explain the behavior changed, checks run, and impacts on generated data or detector outputs. Include linked issues or screenshots when relevant.
 
 ## Data and Security
 
