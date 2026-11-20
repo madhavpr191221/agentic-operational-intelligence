@@ -6,7 +6,8 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from agentic_ops.store import EventStore
-from agentic_ops.retrieval import HybridRetriever
+from agentic_ops.retrieval import HybridRetriever, LocalRAGModels
+from agentic_ops.search_corpus import CorpusSearch
 
 
 class EvidenceTools:
@@ -15,9 +16,43 @@ class EvidenceTools:
         "account": "account-api", "delivery": "delivery-api",
     }
 
-    def __init__(self, store: EventStore, retriever: HybridRetriever | None = None):
+    def __init__(self, store: EventStore, retriever: HybridRetriever | None = None,
+                 corpus: CorpusSearch | None = None):
         self.store = store
-        self.retriever = retriever or HybridRetriever(store)
+        models = retriever.models if retriever is not None and retriever.models is not None else LocalRAGModels()
+        self.retriever = retriever or HybridRetriever(store, models=models)
+        self.corpus = corpus or CorpusSearch(models=models)
+
+    @staticmethod
+    def _dedupe(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        unique: list[dict[str, Any]] = []
+        evidence_ids: set[str] = set()
+        passage_keys: set[tuple[Any, ...]] = set()
+        for record in records:
+            evidence_id = str(record.get("evidence_id", ""))
+            payload = record.get("payload", {})
+            passage_key = (record.get("source"), payload.get("source_path"),
+                           payload.get("section_title"), payload.get("page_number"))
+            if evidence_id and evidence_id in evidence_ids:
+                continue
+            if payload.get("source_path") and passage_key in passage_keys:
+                continue
+            if evidence_id:
+                evidence_ids.add(evidence_id)
+            if payload.get("source_path"):
+                passage_keys.add(passage_key)
+            unique.append(record)
+        return unique
+
+    def _rank_with_corpus(self, records: list[dict[str, Any]], query: str, limit: int,
+                          sources: tuple[str, ...], category: str | None = None,
+                          start_at: str | None = None, end_at: str | None = None,
+                          service: str | None = None) -> list[dict[str, Any]]:
+        archived = self.corpus.search(query, cutoff=end_at, start_at=start_at,
+                                      sources=sources, category=category,
+                                      limit=max(40, limit * 5), rerank=False,
+                                      service=service)
+        return self._rank(self._dedupe([*records, *archived]), query, limit)
 
     @staticmethod
     def _focus_indices(observations_by_index: dict[int, dict[str, Any]],
@@ -265,10 +300,19 @@ class EvidenceTools:
         return self._result(records, "tickets")
 
     def search_issues(self, run_id: str, query: str = "", limit: int = 20,
-                      end_at: str | None = None) -> dict[str, Any]:
+                      end_at: str | None = None,
+                      category: str | None = None) -> dict[str, Any]:
         records = self.store.search_events(run_id, ("issue_tracker",), "", 1000,
                                            start_at=None, end_at=end_at)
-        return self._result(self._rank(records, query, limit), "issues")
+        if category:
+            expected_service = self._SERVICE_BY_CATEGORY.get(category)
+            records = [item for item in records
+                       if item["payload"].get("category") == category
+                       or (not item["payload"].get("category") and
+                           item["payload"].get("service") == expected_service)]
+        ranked = self._rank_with_corpus(records, query, limit, ("issue_tracker",),
+                                        category=category, end_at=end_at)
+        return self._result(ranked, "issues")
 
     def search_product_logs(self, run_id: str, query: str = "", limit: int = 20,
                             start_at: str | None = None, end_at: str | None = None) -> dict[str, Any]:
@@ -279,7 +323,14 @@ class EvidenceTools:
             records = [record for record in records
                        if query.casefold() in str(record["payload"].get("service", "")).casefold()
                        or query.casefold() in str(record["payload"].get("message", "")).casefold()]
-        return self._result(records[-limit:], "logs")
+        category = next((name for name, service in self._SERVICE_BY_CATEGORY.items()
+                         if service.casefold() == query.casefold()), None)
+        archived = self.corpus.search_structured(
+            query=query, sources=("product_logs",), cutoff=end_at, start_at=start_at,
+            category=category, service=query if query else None, limit=max(1, limit))
+        ranked = self._dedupe([*records, *archived])
+        ranked.sort(key=lambda item: item.get("simulated_at", ""), reverse=True)
+        return self._result(ranked[:max(1, limit)], "logs")
 
     def list_changes(self, run_id: str, service: str = "", limit: int = 20,
                      start_at: str | None = None, end_at: str | None = None) -> dict[str, Any]:
@@ -288,7 +339,10 @@ class EvidenceTools:
         if service.strip():
             records = [record for record in records if service.casefold() in
                        str(record["payload"].get("service", "")).casefold()]
-        return self._result(self._rank(records, service, limit), "changes")
+        ranked = self._rank_with_corpus(records, service or "recent service change", limit,
+                                        ("change_log",), start_at=start_at, end_at=end_at,
+                                        service=service or None)
+        return self._result(ranked, "changes")
 
     def search_related_evidence(self, run_id: str, query: str, category: str,
                                 start_at: str | None, end_at: str | None,
@@ -298,7 +352,10 @@ class EvidenceTools:
                                            "", 1000, start_at=start_at, end_at=end_at)
         records = [item for item in records if item["source"] != "support_tickets"
                    or item["payload"].get("category") == category]
-        return self._result(self.retriever.rank(records, query, limit), "records")
+        ranked = self._rank_with_corpus(records, query, limit,
+                                        ("support_tickets", "issue_tracker", "change_log"),
+                                        category, start_at, end_at)
+        return self._result(ranked, "records")
 
     def search_operational_docs(self, run_id: str, query: str, category: str,
                                 end_at: str | None = None,
@@ -317,7 +374,11 @@ class EvidenceTools:
             and (not item["payload"].get("categories")
                  or category in item["payload"].get("categories", []))
         )]
-        return self._result(self.retriever.rank(records, query, limit), "passages")
+        archived = self.corpus.search(query, cutoff=end_at,
+                                      sources=("runbooks", "knowledge_docs"), category=category,
+                                      limit=max(40, limit * 5), rerank=False)
+        records = self._dedupe([*records, *archived])
+        return self._result(self._rank(records, query, limit), "passages")
 
     def search_runbooks(self, run_id: str, query: str, category: str,
                         limit: int = 5) -> dict[str, Any]:
@@ -591,6 +652,8 @@ class EvidenceTools:
             return None
         return {"evidence_id": event["evidence_id"], "observed_at": event["simulated_at"],
                 "source": event["source"], "event_type": event["event_type"], "payload": event["payload"],
+                **({"retrieval": event["retrieval"]} if event.get("retrieval") else {}),
+                **({"available_at": event["available_at"]} if event.get("available_at") else {}),
                 **({"summary": event["payload"].get("text", ""),
                    "page_number": event["payload"].get("page_number"),
                    "source_path": event["payload"].get("source_path"),

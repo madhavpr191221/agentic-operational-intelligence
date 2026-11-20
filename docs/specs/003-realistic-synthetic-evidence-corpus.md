@@ -28,7 +28,9 @@ Count randomness, evidence randomness, and customer wording use independent seed
 
 ## Retrieval and time boundary
 
-Text searches over customer tickets, issue descriptions, change summaries, and operational reference documents combine keyword overlap with cosine similarity from `text-embedding-3-small`. Service telemetry is queried by structured service and time fields. Embeddings are cached in local SQLite using the model and normalized-content hash. Runbooks are extracted per PDF page; Markdown references are split by section. Evidence retains the source path and page or section. Documents have an availability timestamp and are filtered at the investigation cutoff.
+Text searches over customer tickets, issue descriptions, change summaries, and operational reference documents combine SQLite FTS5 lexical candidates with local GPU embeddings from `sentence-transformers/all-MiniLM-L6-v2`. Reciprocal-rank fusion combines keyword and vector ranks; `cross-encoder/ms-marco-MiniLM-L6-v2` reranks the strongest candidates. SQLite stores searchable metadata and payloads, and USearch stores the cosine HNSW vectors. Service telemetry remains structured and is queried by service and time, not embedded. Runbooks are extracted per PDF page; Markdown references use heading-aware sections and bounded overlapping chunks. Evidence retains source path, page or section, availability time, and category. Dated content is filtered at the investigation cutoff.
+
+The generated archive contains 20,000 records across tickets, service logs, issue records, and changes, plus 400 Markdown references with 10 sections each. Its generated files and index are ignored under `.data/`; the source generator, small sample, and manifest are tracked. See [the local hybrid RAG design](../design/local-hybrid-rag.md) for index setup and retrieval evaluation.
 
 Time-varying evidence searches include records only up to the selected investigation cutoff. Static runbook pages are not time-filtered. Ticket-theme comparisons report reason counts and shares for the selected episode and an equal-length preceding interval, with customer examples. The agent may make targeted follow-up searches; it must consider competing explanations and state what the records cannot establish.
 
@@ -37,7 +39,7 @@ Time-varying evidence searches include records only up to the selected investiga
 - All customer interactions, services, issues, and changes are fictional.
 - The detector package continues to accept only timestamped category counts.
 - The investigator is read-only; runbook guidance is advisory and never executes an action.
-- Tests inject fake embedding functions or use keyword-only fallback; they do not make paid API calls.
+- Unit tests use deterministic embedding and reranking fakes; they do not download models or make paid API calls.
 
 ## Acceptance checks
 
@@ -48,3 +50,5 @@ Time-varying evidence searches include records only up to the selected investiga
 - Searches cannot return records after their alert cutoff.
 - PDF text can be extracted with page numbers and citations resolve to the source runbook page; Markdown passages retain section-level provenance.
 - Hybrid retrieval finds a paraphrased record and reuses cached vectors on repeat searches.
+- Local index filters enforce source, category, service, and availability cutoffs.
+- The seeded 104-query evaluator reports retrieval metrics before and after reranking; these synthetic scores are regression checks, not production-quality estimates.

@@ -2,11 +2,24 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentic_ops.retrieval import HybridRetriever, load_knowledge_passages, load_runbook_pages
+from agentic_ops.retrieval import HybridRetriever, chunk_text, load_knowledge_passages, load_runbook_pages
 from agentic_ops.store import EventStore
 
 
 class RetrievalTests(unittest.TestCase):
+    def test_chunks_respect_token_limit_and_keep_overlap(self):
+        class WhitespaceTokenizer:
+            def encode(self, text, **kwargs):
+                return text.split()
+
+            def decode(self, tokens, **kwargs):
+                return " ".join(tokens)
+
+        chunks = chunk_text("one two three four five six seven eight nine ten",
+                            tokenizer=WhitespaceTokenizer(), max_tokens=5, overlap=1)
+        self.assertTrue(all(len(chunk.split()) <= 5 for chunk in chunks))
+        self.assertEqual(chunks[0].split()[-1], chunks[1].split()[0])
+
     def test_runbook_pdfs_are_searchable_and_page_numbered(self):
         pages = load_runbook_pages()
         self.assertEqual({page["runbook_id"] for page in pages},

@@ -107,7 +107,7 @@ class MockInvestigator(Investigator):
                  lambda: evidence_tools.search_tickets(run_id, query, 12, category,
                                                       episode["context_start_at"], episode["analysis_end_at"])),
                 ("search_issues", {"query": query, "limit": 10, "as_of": episode["analysis_end_at"]},
-                 lambda: evidence_tools.search_issues(run_id, query, 10, episode["analysis_end_at"])),
+                 lambda: evidence_tools.search_issues(run_id, query, 10, episode["analysis_end_at"], category)),
                 ("search_product_logs", {"query": service, "limit": 10},
                  lambda: evidence_tools.search_product_logs(run_id, service, 10,
                                                            episode["context_start_at"], episode["analysis_end_at"])),
@@ -337,7 +337,7 @@ class OpenAIInvestigator(Investigator):
             limit = max(1, min(8, limit))
             return run_tool("search_issues", {"category": category, "query": query, "limit": limit},
                             lambda: evidence_tools.search_issues(
-                                run_id, query, limit, selected_episode(category)["analysis_end_at"]))
+                                run_id, query, limit, selected_episode(category)["analysis_end_at"], category))
 
         @function_tool(name_override="search_product_logs", description_override=
                        "Search synthetic product logs using one or two service or error keywords. Do not put dates in the query; records include timestamps.")
