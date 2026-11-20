@@ -27,6 +27,12 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(any(event["event_type"] == "window_observation" for event in events))
         self.assertTrue(any(event["event_type"] == "window_score" for event in events))
         self.assertTrue(any(event["event_type"] == "anomaly_alert" for event in events))
+        observation = next(event for event in events if event["event_type"] == "window_observation")
+        score_event = next(event for event in events if event["event_type"] == "window_score")
+        self.assertEqual(observation["payload"]["schema_version"], 1)
+        self.assertEqual(score_event["payload"]["schema_version"], 1)
+        self.assertIn("detection_result", score_event["payload"])
+        self.assertNotIn("ticket_text", score_event["payload"]["detection_result"])
         alert = next(event for event in events if event["event_type"] == "anomaly_alert")
         self.assertEqual(alert["payload"]["statistical_episode"]["window_count"], 1)
         self.assertEqual(self.runtime.store.get_truth(run["run_id"])["cause"], "payment_authorization_failure")
@@ -80,13 +86,14 @@ class RuntimeTests(unittest.TestCase):
 
         self.runtime._provided_investigator = InvestigatorWithoutScope()
         run = self.runtime.start_run(SimulationConfig(
-            scenario="healthy", seed=42, calibration_windows=48, tick_delay_seconds=0.0))
+            scenario="healthy", seed=42, window_count=52, calibration_windows=48,
+            tick_delay_seconds=0.0))
         self.runtime.wait_for_run(run["run_id"], timeout=20)
         observations = self.runtime.store.search_events(
             run["run_id"], ("detector",), limit=1000, event_types=("window_observation",))
         windows = sorted(int(event["payload"]["window_index"]) for event in observations)
-        start, end = windows[-3], windows[-1]
-        for index in windows[-3:]:
+        start, end = windows[-4], windows[-2]
+        for index in windows[-4:-1]:
             observation = next(event for event in observations
                                if int(event["payload"]["window_index"]) == index)
             self.runtime.store.add_event(
@@ -109,7 +116,9 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(saved["status"], "abstained")
         summary = saved["report"]["episode_summaries"][0]
         windows = summary["focus"]["window_series"]
-        self.assertEqual([w["window_index"] for w in windows], [end - 2, end - 1, end])
+        available_indices = {int(event["payload"]["window_index"]) for event in observations}
+        expected_indices = [index for index in range(end - 2, end + 2) if index in available_indices]
+        self.assertEqual([w["window_index"] for w in windows], expected_indices)
         self.assertTrue(all(w["start_at"] and w["end_at"] for w in windows))
         self.assertEqual(summary["focus"]["total_tickets"], sum(w["tickets"] for w in windows))
 

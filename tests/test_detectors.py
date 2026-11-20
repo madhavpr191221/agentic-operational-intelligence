@@ -1,10 +1,11 @@
 import math
 import unittest
 
-from agentic_ops.detectors import (
+from agentic_ops.detection import (
     AlertEpisodeTracker,
     CategoryDetectorSuite,
     CountDetectorSuite,
+    CountObservation,
     DetectorConfig,
     gamma_poisson_log_bayes_factor,
     negative_binomial_log_likelihood_ratio,
@@ -86,11 +87,25 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(suite.expected, 5.0)
 
     def test_category_detector_accepts_count_vector_only(self):
-        suite = CategoryDetectorSuite("poisson", warmup_windows=2)
-        result = suite.update({"payments": 5, "orders": 8, "account": 4, "delivery": 6}, 0)
-        self.assertEqual(set(result), {"payments", "orders", "account", "delivery"})
+        suite = CategoryDetectorSuite("poisson", warmup_windows=2,
+                                      categories=("payments", "orders", "account", "delivery"))
+        observation = CountObservation(0, "2026-01-01T00:00:00Z", "2026-01-01T00:30:00Z",
+                                       {"payments": 5, "orders": 8, "account": 4, "delivery": 6})
+        result = suite.update(observation)
+        self.assertEqual(set(result.categories), {"payments", "orders", "account", "delivery"})
+        self.assertEqual(result.to_dict()["schema_version"], 1)
+        self.assertEqual(result.to_dict()["window_start"], observation.window_start)
         with self.assertRaisesRegex(ValueError, "Unknown ticket categories"):
-            suite.update({"payments": 5, "customer_text": "ignored"}, 1)
+            suite.update(CountObservation(1, "2026-01-01T00:30:00Z", "2026-01-01T01:00:00Z",
+                                          {"payments": 5, "customer_text": 2}))
+
+    def test_count_observation_rejects_negative_values_and_extra_evidence(self):
+        with self.assertRaisesRegex(ValueError, "cannot be negative"):
+            CountObservation(0, "start", "end", {"payments": -1})
+        with self.assertRaisesRegex(TypeError, "must be integers"):
+            CountObservation(0, "start", "end", {"payments": 1.5})
+        with self.assertRaises(TypeError):
+            CountObservation(0, "start", "end", {"payments": 1}, ticket_text="failure")
 
     def test_alert_episode_groups_only_consecutive_statistical_crossings(self):
         tracker = AlertEpisodeTracker()

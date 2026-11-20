@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from agentic_ops.detectors import CountDetectorSuite, calibrated_config
 from agentic_ops.store import EventStore
 
 
@@ -253,32 +252,6 @@ class EvidenceTools:
                              "observed_at": latest["simulated_at"], "summary": "Latest window detector scores."})
         return {"alert_count": len(alerts), "alerts": [self._brief(e) for e in alerts[-5:]],
                 "latest_window": self._brief(latest) if latest else None, "evidence": evidence}
-
-    def run_anomaly_detection(self, run_id: str, window_index: int = -1,
-                              model: str = "poisson") -> dict[str, Any]:
-        run = self.store.get_run(run_id)
-        if run is None:
-            raise ValueError("Unknown run")
-        observations = self.store.search_events(run_id, ("detector",), limit=1000,
-                                               event_types=("window_observation",))
-        if not observations:
-            return {"error": "No completed windows are available yet.", "evidence": []}
-        warmup = int(run["config"].get("calibration_windows", 48))
-        suite = CountDetectorSuite(calibrated_config(model, warmup))
-        target = observations[-1] if window_index < 0 else next(
-            (event for event in observations if event["payload"].get("window_index") == window_index), None
-        )
-        if target is None:
-            return {"error": f"Window {window_index} is not available.", "evidence": []}
-        score_result = None
-        for event in observations:
-            scores, alert = suite.update(int(event["payload"]["ticket_count"]), int(event["payload"]["window_index"]))
-            if event["evidence_id"] == target["evidence_id"]:
-                score_result = {"window_index": event["payload"]["window_index"], "observed": event["payload"]["ticket_count"],
-                                "scores": [score.to_dict() for score in scores], "alert": alert}
-        return {"model": model, "result": score_result,
-                "evidence": [{"evidence_id": target["evidence_id"], "source": "detector",
-                              "observed_at": target["simulated_at"], "summary": "Observed ticket count for this window."}]}
 
     def search_tickets(self, run_id: str, query: str = "", limit: int = 20, category: str | None = None,
                        start_at: str | None = None, end_at: str | None = None) -> dict[str, Any]:

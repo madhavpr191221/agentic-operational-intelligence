@@ -6,8 +6,14 @@ import math
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
-from agentic_ops.domain import CATEGORIES, Score
+from agentic_ops.detection.contracts import (
+    CategoryDetection,
+    CountObservation,
+    DetectionResult,
+    Score,
+)
 
 
 def poisson_log_likelihood_ratio(observed: int, expected: float) -> float:
@@ -83,7 +89,8 @@ def calibrated_config(model: str, warmup_windows: int = 48,
                       category: str | None = None,
                       baseline_mode: str = "fixed") -> DetectorConfig:
     """Load model-specific thresholds produced by the calibration script."""
-    path = Path(thresholds_path) if thresholds_path else Path(__file__).resolve().parents[2] / "configs" / "detector_thresholds.json"
+    path = (Path(thresholds_path) if thresholds_path else
+            Path(__file__).resolve().parents[3] / "configs" / "detector_thresholds.json")
     values: dict[str, float] = {}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -182,25 +189,45 @@ class CountDetectorSuite:
 class CategoryDetectorSuite:
     """Independent count detector state for each support category."""
 
-    def __init__(self, model: str, warmup_windows: int, baseline_mode: str = "fixed",
+    def __init__(self, model: str, warmup_windows: int, categories: Sequence[str],
+                 baseline_mode: str = "fixed",
                  thresholds_path: str | Path | None = None):
         if baseline_mode not in {"fixed", "ewma"}:
             raise ValueError("baseline_mode must be 'fixed' or 'ewma'")
+        if not categories or len(set(categories)) != len(categories):
+            raise ValueError("categories must be a non-empty sequence of unique names")
+        self.categories = tuple(categories)
         self.suites = {
             category: CountDetectorSuite(calibrated_config(
                 model, warmup_windows, thresholds_path, category, baseline_mode
             ))
-            for category in CATEGORIES
+            for category in self.categories
         }
 
-    def update(self, category_counts: dict[str, int], index: int) -> dict[str, tuple[list[Score], bool]]:
-        unknown = set(category_counts) - set(self.suites)
+    def update(self, observation: CountObservation) -> DetectionResult:
+        """Score only the category counts from the supplied observation."""
+        unknown = set(observation.category_counts) - set(self.suites)
         if unknown:
             raise ValueError(f"Unknown ticket categories: {', '.join(sorted(unknown))}")
-        return {
-            category: suite.update(int(category_counts.get(category, 0)), index)
+        categories = {
+            category: CategoryDetection(
+                category=category,
+                observed=int(observation.category_counts.get(category, 0)),
+                expected=(scores[0].expected if scores else None),
+                scores=tuple(scores),
+                alerted=alerted,
+            )
             for category, suite in self.suites.items()
+            for scores, alerted in [suite.update(
+                int(observation.category_counts.get(category, 0)), observation.window_index
+            )]
         }
+        return DetectionResult(
+            window_index=observation.window_index,
+            window_start=observation.window_start,
+            window_end=observation.window_end,
+            categories=categories,
+        )
 
 
 class AlertEpisodeTracker:

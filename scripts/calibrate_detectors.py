@@ -8,7 +8,7 @@ import math
 from collections import defaultdict
 from pathlib import Path
 
-from agentic_ops.detectors import CountDetectorSuite, DetectorConfig
+from agentic_ops.detection import CountDetectorSuite, DetectorConfig
 from agentic_ops.domain import SimulationConfig
 from agentic_ops.simulation import CATEGORIES, generate_run
 

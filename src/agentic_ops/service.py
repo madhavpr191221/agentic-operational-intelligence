@@ -13,7 +13,11 @@ from typing import Any
 from dotenv import dotenv_values
 
 from agentic_ops.agent import Investigator, MockInvestigator, OpenAIInvestigator
-from agentic_ops.detectors import AlertEpisodeTracker, CategoryDetectorSuite
+from agentic_ops.detection import (
+    AlertEpisodeTracker,
+    CategoryDetectorSuite,
+    CountObservation,
+)
 from agentic_ops.domain import CATEGORIES, SimulationConfig
 from agentic_ops.evidence import EvidenceTools
 from agentic_ops.simulation import generate_run
@@ -83,7 +87,7 @@ class OperationsRuntime:
         return self.store.get_run(run_id) or {"run_id": run_id}
 
     def _run_simulation(self, run_id: str, config: SimulationConfig, control: RunControl) -> None:
-        suite = CategoryDetectorSuite(config.arrival_model, config.calibration_windows)
+        suite = CategoryDetectorSuite(config.arrival_model, config.calibration_windows, CATEGORIES)
         episode_tracker = AlertEpisodeTracker()
         try:
             for window in generate_run(config):
@@ -101,24 +105,33 @@ class OperationsRuntime:
                                          generated.event_type, generated.payload)
                 observation = self.store.add_event(
                     run_id, window.end, "detector", "window_observation",
-                    {"window_index": window.index, "window_start": window.start, "window_end": window.end,
+                    {"schema_version": 1, "window_index": window.index,
+                     "window_start": window.start, "window_end": window.end,
                      "ticket_count": window.ticket_count, "category_counts": window.category_counts},
                 )
-                category_results = suite.update(window.category_counts, window.index)
+                count_observation = CountObservation(
+                    window_index=window.index,
+                    window_start=window.start,
+                    window_end=window.end,
+                    category_counts=window.category_counts,
+                )
+                detection_result = suite.update(count_observation)
                 score_event = self.store.add_event(
                     run_id, window.end, "detector", "window_score",
-                    {"window_index": window.index, "observed": window.ticket_count,
+                    {"schema_version": 1, "window_index": window.index,
+                     "observed": window.ticket_count,
                      "category_counts": window.category_counts,
                      "scores_by_category": {
-                         category: {"observed": scores[0].observed if scores else window.category_counts[category],
-                                    "expected": scores[0].expected if scores else None,
-                                    "scores": [score.to_dict() for score in scores], "alerted": alerted}
-                         for category, (scores, alerted) in category_results.items()
+                         category: result.to_dict()
+                         for category, result in detection_result.categories.items()
                      },
                      "calibration": window.index < config.calibration_windows,
-                     "observation_evidence_id": observation["evidence_id"]},
+                     "observation_evidence_id": observation["evidence_id"],
+                     "detection_result": detection_result.to_dict()},
                 )
-                for category, (scores, alerted) in category_results.items():
+                for category, result in detection_result.categories.items():
+                    scores = result.scores
+                    alerted = result.alerted
                     statistical_episode = episode_tracker.update(
                         category, window.index, window.category_counts[category], alerted
                     )
@@ -140,7 +153,8 @@ class OperationsRuntime:
                             },
                         }
                         self.store.add_event(run_id, window.end, "detector", "anomaly_alert",
-                                             {"metric": "support_ticket_arrivals", "category": category,
+                                             {"schema_version": 1,
+                                              "metric": "support_ticket_arrivals", "category": category,
                                               "window_index": window.index, "window_start": window.start,
                                               "window_end": window.end, "ticket_count": scores[0].observed,
                                               "expected": scores[0].expected,

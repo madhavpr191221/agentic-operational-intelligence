@@ -24,6 +24,9 @@ class EvidenceTests(unittest.TestCase):
         self.assertNotIn("hidden_truth_value", repr(result))
         self.assertEqual(result["count"], 1)
 
+    def test_investigator_evidence_tools_do_not_recompute_detection(self):
+        self.assertFalse(hasattr(EvidenceTools, "run_anomaly_detection"))
+
     def test_mock_investigator_cites_tool_returned_evidence(self):
         self.store.add_event(self.run_id, "2026-01-01T00:00:00Z", "issue_tracker", "issue_created",
                              {"issue_key": "PAY-204", "title": "Payment authorization timeouts",

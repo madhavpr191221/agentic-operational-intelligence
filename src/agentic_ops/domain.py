@@ -40,21 +40,6 @@ class TelemetryEvent:
 
 
 @dataclass
-class Score:
-    detector: str
-    score_name: str
-    score: float
-    threshold: float
-    expected: float
-    observed: int
-    anomalous: bool
-    detail: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
 class EvidenceRef:
     evidence_id: str
     source: str

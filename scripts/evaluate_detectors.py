@@ -7,7 +7,7 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-from agentic_ops.detectors import CategoryDetectorSuite
+from agentic_ops.detection import CategoryDetectorSuite, CountObservation
 from agentic_ops.domain import SimulationConfig
 from agentic_ops.simulation import CATEGORIES, generate_run
 
@@ -33,7 +33,7 @@ def _run_scores(config: SimulationConfig, thresholds_path: str | Path | None = N
                 ) -> dict[str, dict[str, dict[str, list[tuple[int, bool]]]]]:
     suites = {
         baseline: CategoryDetectorSuite(
-            config.arrival_model, config.calibration_windows, baseline, thresholds_path
+            config.arrival_model, config.calibration_windows, CATEGORIES, baseline, thresholds_path
         )
         for baseline in BASELINES
     }
@@ -46,10 +46,12 @@ def _run_scores(config: SimulationConfig, thresholds_path: str | Path | None = N
     }
     for window in generate_run(config, include_ticket_events=False):
         for baseline, suite in suites.items():
-            category_results = suite.update(window.category_counts, window.index)
-            for category, (scores, alerted) in category_results.items():
-                results[baseline][category]["combined"].append((window.index, alerted))
-                for score in scores:
+            category_results = suite.update(CountObservation(
+                window.index, window.start, window.end, window.category_counts
+            ))
+            for category, result in category_results.categories.items():
+                results[baseline][category]["combined"].append((window.index, result.alerted))
+                for score in result.scores:
                     results[baseline][category][score.detector].append(
                         (window.index, score.anomalous)
                     )

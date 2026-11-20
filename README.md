@@ -16,6 +16,10 @@ A local, fictional operations-intelligence demo that detects category-specific s
 
 All records are generated locally from a reproducible seed. No external incident data is needed.
 
+## Detection and investigation are separate
+
+The statistical detector receives only timestamped per-category ticket counts. It emits versioned scores and alert events; it does not read ticket text, product logs, issues, or changes. The investigator runs only after an operator requests an investigation. It reads the persisted alert and uses evidence tools, but cannot import or recompute detector logic. This keeps alert quality measurable independently from the quality of the RCA explanation.
+
 ## Requirements
 
 - Python 3.11 or later and [uv](https://docs.astral.sh/uv/).
@@ -127,7 +131,8 @@ This requires the OpenAI key and API credits. Each investigation can make multip
 
 ## Project layout
 
-- `src/agentic_ops/`: simulation, statistical detectors, evidence tools, API, and investigator.
+- `src/agentic_ops/detection/`: count-only detector contracts and statistical engine.
+- `src/agentic_ops/`: simulation, runtime orchestration, evidence tools, API, and investigator.
 - `web/`: React, TypeScript, and Vite interface.
 - `tests/`: Python unit and API tests.
 - `docs/specs/`: requirements, design, and task plan for the ticket-spike RCA slice.
