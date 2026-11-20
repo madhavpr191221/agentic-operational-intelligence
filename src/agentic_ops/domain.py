@@ -18,7 +18,9 @@ class SimulationConfig:
     tick_delay_seconds: float = 0.15
     window_count: int = 144
     calibration_windows: int = 48
-    baseline_tickets_per_window: float = 3.5
+    # Per-category clean rates in CATEGORIES order, calibrated to the demo
+    # baseline of roughly Payments 5, Orders 8, Account 4, Delivery 6.
+    baseline_category_means: tuple[float, ...] = (4.5, 8.0, 4.0, 6.0)
     payment_attempts_per_window: float = 120.0
     contact_probability_per_failure: float = 0.85
     negative_binomial_shape: float = 4.0

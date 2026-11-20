@@ -13,7 +13,7 @@ from typing import Any
 from dotenv import dotenv_values
 
 from agentic_ops.agent import Investigator, MockInvestigator, OpenAIInvestigator
-from agentic_ops.detectors import CategoryDetectorSuite
+from agentic_ops.detectors import AlertEpisodeTracker, CategoryDetectorSuite
 from agentic_ops.domain import CATEGORIES, SimulationConfig
 from agentic_ops.evidence import EvidenceTools
 from agentic_ops.simulation import generate_run
@@ -84,6 +84,7 @@ class OperationsRuntime:
 
     def _run_simulation(self, run_id: str, config: SimulationConfig, control: RunControl) -> None:
         suite = CategoryDetectorSuite(config.arrival_model, config.calibration_windows)
+        episode_tracker = AlertEpisodeTracker()
         try:
             for window in generate_run(config):
                 with control.condition:
@@ -118,6 +119,9 @@ class OperationsRuntime:
                      "observation_evidence_id": observation["evidence_id"]},
                 )
                 for category, (scores, alerted) in category_results.items():
+                    statistical_episode = episode_tracker.update(
+                        category, window.index, window.category_counts[category], alerted
+                    )
                     if alerted:
                         triggered = [score.detector for score in scores if score.anomalous]
                         by_detector = {score.detector: score for score in scores}
@@ -142,6 +146,7 @@ class OperationsRuntime:
                                               "expected": scores[0].expected,
                                               "signal": signal,
                                               "scores": [score.to_dict() for score in scores],
+                                              "statistical_episode": statistical_episode,
                                               "detectors_triggered": triggered,
                                               "observation_evidence_id": observation["evidence_id"],
                                               "window_score_evidence_id": score_event["evidence_id"]})

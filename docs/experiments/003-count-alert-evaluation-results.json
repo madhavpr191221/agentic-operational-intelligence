@@ -1,0 +1,101 @@
+{
+  "heldout_seeds_per_scenario": 200,
+  "heldout_seed_range": [
+    1000,
+    1199
+  ],
+  "calibration_seed_range": [
+    0,
+    499
+  ],
+  "target_false_alert_episodes_per_day": 0.1,
+  "target_payment_detection_within_two_windows": 0.95,
+  "episode_definition": "Consecutive flagged windows per category; a quiet window ends the statistical grouping only.",
+  "thresholds_file": "configs\\detector_thresholds.json",
+  "results": {
+    "fixed:poisson": {
+      "control_false_alert_episodes_per_day": 0.0375,
+      "control_false_alert_episodes": 45,
+      "control_simulated_days": 1200,
+      "control_episodes_by_scenario": {
+        "healthy": 15,
+        "unrelated_issue": 15,
+        "resolved_issue": 15
+      },
+      "payment_incident_detection_rate": 1.0,
+      "payment_detected_within_two_windows": 1.0,
+      "mean_detection_delay_windows": 0.035,
+      "nonpayment_category_episodes_during_payment_incident": 2,
+      "method_detection_within_two_windows": {
+        "poisson_llr": 1.0,
+        "negative_binomial_llr": 0.96,
+        "standardized_residual": 1.0,
+        "cusum": 1.0,
+        "gamma_poisson_bayes_factor": 1.0
+      }
+    },
+    "ewma:poisson": {
+      "control_false_alert_episodes_per_day": 0.07,
+      "control_false_alert_episodes": 84,
+      "control_simulated_days": 1200,
+      "control_episodes_by_scenario": {
+        "healthy": 28,
+        "unrelated_issue": 28,
+        "resolved_issue": 28
+      },
+      "payment_incident_detection_rate": 1.0,
+      "payment_detected_within_two_windows": 1.0,
+      "mean_detection_delay_windows": 0.04,
+      "nonpayment_category_episodes_during_payment_incident": 2,
+      "method_detection_within_two_windows": {
+        "poisson_llr": 1.0,
+        "negative_binomial_llr": 0.93,
+        "standardized_residual": 1.0,
+        "cusum": 1.0,
+        "gamma_poisson_bayes_factor": 1.0
+      }
+    },
+    "fixed:negative_binomial": {
+      "control_false_alert_episodes_per_day": 0.0625,
+      "control_false_alert_episodes": 75,
+      "control_simulated_days": 1200,
+      "control_episodes_by_scenario": {
+        "healthy": 25,
+        "unrelated_issue": 25,
+        "resolved_issue": 25
+      },
+      "payment_incident_detection_rate": 0.885,
+      "payment_detected_within_two_windows": 0.795,
+      "mean_detection_delay_windows": 0.8531073446327684,
+      "nonpayment_category_episodes_during_payment_incident": 4,
+      "method_detection_within_two_windows": {
+        "poisson_llr": 0.79,
+        "negative_binomial_llr": 0.625,
+        "standardized_residual": 0.72,
+        "cusum": 0.235,
+        "gamma_poisson_bayes_factor": 0.79
+      }
+    },
+    "ewma:negative_binomial": {
+      "control_false_alert_episodes_per_day": 0.0825,
+      "control_false_alert_episodes": 99,
+      "control_simulated_days": 1200,
+      "control_episodes_by_scenario": {
+        "healthy": 33,
+        "unrelated_issue": 33,
+        "resolved_issue": 33
+      },
+      "payment_incident_detection_rate": 0.82,
+      "payment_detected_within_two_windows": 0.73,
+      "mean_detection_delay_windows": 0.8475609756097561,
+      "nonpayment_category_episodes_during_payment_incident": 9,
+      "method_detection_within_two_windows": {
+        "poisson_llr": 0.655,
+        "negative_binomial_llr": 0.43,
+        "standardized_residual": 0.455,
+        "cusum": 0.715,
+        "gamma_poisson_bayes_factor": 0.655
+      }
+    }
+  }
+}

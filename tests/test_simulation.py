@@ -15,19 +15,32 @@ class SimulationTests(unittest.TestCase):
         config = SimulationConfig(seed=190, window_count=60, calibration_windows=20)
         self.assertEqual(event_signature(config), event_signature(config))
 
+    def test_count_only_generation_matches_full_run_counts_without_ticket_text(self):
+        config = SimulationConfig(seed=91, window_count=60, calibration_windows=20)
+        full = list(generate_run(config))
+        counts_only = list(generate_run(config, include_ticket_events=False))
+        self.assertEqual([w.category_counts for w in full], [w.category_counts for w in counts_only])
+        self.assertEqual([w.ticket_count for w in full], [w.ticket_count for w in counts_only])
+        self.assertTrue(all(not any(event.source == "support_tickets" for event in w.events)
+                            for w in counts_only))
+
     def test_different_seed_changes_random_arrivals(self):
         first = SimulationConfig(seed=8, window_count=60, calibration_windows=20)
         second = SimulationConfig(seed=9, window_count=60, calibration_windows=20)
         self.assertNotEqual([w.ticket_count for w in generate_run(first)],
                             [w.ticket_count for w in generate_run(second)])
 
-    def test_payment_failure_raises_random_ticket_rate(self):
+    def test_payment_failure_raises_payment_category_rate_to_about_31(self):
         config = SimulationConfig(seed=17)
         windows = list(generate_run(config))
-        baseline = sum(w.ticket_count for w in windows[:48]) / 48
-        incident = sum(w.ticket_count for w in windows[-4:]) / 4
-        self.assertGreater(incident, baseline * 5)
-        self.assertGreater(max(w.ticket_count for w in windows[-4:]), min(w.ticket_count for w in windows[-4:]))
+        baseline = sum(w.category_counts["payments"] for w in windows[:48]) / 48
+        incident = sum(w.category_counts["payments"] for w in windows[-4:]) / 4
+        self.assertGreater(baseline, 3.5)
+        self.assertLess(baseline, 6.5)
+        self.assertGreater(incident, 24)
+        self.assertLess(incident, 38)
+        self.assertGreater(max(w.category_counts["payments"] for w in windows[-4:]),
+                           min(w.category_counts["payments"] for w in windows[-4:]))
 
     def test_issue_is_opened_48_hours_before_end(self):
         windows = list(generate_run(SimulationConfig(seed=1)))
@@ -39,9 +52,12 @@ class SimulationTests(unittest.TestCase):
 
     def test_unrelated_issue_does_not_change_payment_ticket_category(self):
         windows = list(generate_run(SimulationConfig(scenario="unrelated_issue", seed=5)))
-        latest = [event for event in windows[-4] .events if event.source == "support_tickets"]
-        self.assertTrue(latest)
-        self.assertNotIn("payments", [event.payload["category"] for event in latest])
+        baseline = sum(w.category_counts["payments"] for w in windows[:48]) / 48
+        distractor = [event for event in windows[-5].events
+                      if event.source == "change_log" and event.payload.get("change_key") == "CHG-889"]
+        incident_window = sum(w.category_counts["payments"] for w in windows[-4:]) / 4
+        self.assertTrue(distractor)
+        self.assertLess(incident_window, baseline * 2.5)
 
     def test_each_ticket_is_one_message_record_and_counts_reconcile(self):
         windows = list(generate_run(SimulationConfig(seed=31, window_count=12, calibration_windows=4)))

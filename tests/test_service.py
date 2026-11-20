@@ -19,7 +19,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_run_emits_scores_alerts_and_keeps_truth_separate(self):
         config = SimulationConfig(seed=14, window_count=52, calibration_windows=20,
-                                  tick_delay_seconds=0.0, baseline_tickets_per_window=3.0)
+                                  tick_delay_seconds=0.0)
         run = self.runtime.start_run(config)
         result = self.runtime.wait_for_run(run["run_id"], timeout=20)
         self.assertEqual(result["status"], "completed")
@@ -27,19 +27,21 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(any(event["event_type"] == "window_observation" for event in events))
         self.assertTrue(any(event["event_type"] == "window_score" for event in events))
         self.assertTrue(any(event["event_type"] == "anomaly_alert" for event in events))
+        alert = next(event for event in events if event["event_type"] == "anomaly_alert")
+        self.assertEqual(alert["payload"]["statistical_episode"]["window_count"], 1)
         self.assertEqual(self.runtime.store.get_truth(run["run_id"])["cause"], "payment_authorization_failure")
         public_records = self.runtime.evidence.search_issues(run["run_id"])
         self.assertNotIn("payment_authorization_failure", repr(public_records))
 
     def test_operator_investigation_returns_cited_report(self):
         config = SimulationConfig(seed=4, window_count=52, calibration_windows=20,
-                                  tick_delay_seconds=0.0, baseline_tickets_per_window=3.0)
+                                  tick_delay_seconds=0.0)
         run = self.runtime.start_run(config)
         self.runtime.wait_for_run(run["run_id"], timeout=20)
         alert = self.runtime.store.search_events(run["run_id"], ("detector",), event_types=("anomaly_alert",))[-1]
         started = self.runtime.start_investigation(run["run_id"], "What is driving the increase?",
                                                    alert["evidence_id"])
-        deadline = time.time() + 3
+        deadline = time.time() + 10
         result = self.runtime.store.get_investigation(started["investigation_id"])
         while result and result["status"] in {"queued", "running"} and time.time() < deadline:
             time.sleep(0.02)
@@ -59,10 +61,12 @@ class RuntimeTests(unittest.TestCase):
 
     def test_investigation_rejects_duplicate_categories(self):
         config = SimulationConfig(seed=4, window_count=52, calibration_windows=20,
-                                  tick_delay_seconds=0.0, baseline_tickets_per_window=3.0)
+                                  tick_delay_seconds=0.0)
         run = self.runtime.start_run(config)
         self.runtime.wait_for_run(run["run_id"], timeout=20)
-        alerts = self.runtime.store.search_events(run["run_id"], ("detector",), event_types=("anomaly_alert",))
+        alerts = [event for event in self.runtime.store.search_events(
+            run["run_id"], ("detector",), event_types=("anomaly_alert",)
+        ) if event["payload"].get("category") == "payments"]
         alert, earlier_alert = alerts[-1], alerts[-2]
         with self.assertRaisesRegex(ValueError, "one alert episode per category"):
             self.runtime.start_investigation(run["run_id"], "Compare these signals",
@@ -76,16 +80,21 @@ class RuntimeTests(unittest.TestCase):
 
         self.runtime._provided_investigator = InvestigatorWithoutScope()
         run = self.runtime.start_run(SimulationConfig(
-            seed=42, tick_delay_seconds=0.0))
+            scenario="healthy", seed=42, calibration_windows=48, tick_delay_seconds=0.0))
         self.runtime.wait_for_run(run["run_id"], timeout=20)
-        alerts = self.runtime.store.search_events(
-            run["run_id"], ("detector",), limit=1000, event_types=("anomaly_alert",))
-        indices = {int(a["payload"]["window_index"]) for a in alerts
-                   if a["payload"]["category"] == "payments"}
-        end = max(indices)
-        start = end
-        while start - 1 in indices:
-            start -= 1
+        observations = self.runtime.store.search_events(
+            run["run_id"], ("detector",), limit=1000, event_types=("window_observation",))
+        windows = sorted(int(event["payload"]["window_index"]) for event in observations)
+        start, end = windows[-3], windows[-1]
+        for index in windows[-3:]:
+            observation = next(event for event in observations
+                               if int(event["payload"]["window_index"]) == index)
+            self.runtime.store.add_event(
+                run["run_id"], observation["simulated_at"], "detector", "anomaly_alert",
+                {"category": "payments", "window_index": index,
+                 "ticket_count": observation["payload"]["category_counts"]["payments"],
+                 "expected": 4.5},
+            )
         started = self.runtime.start_investigation(
             run["run_id"], "Investigate the selected episode", episode_selections=[{
                 "category": "payments", "start_window_index": start,

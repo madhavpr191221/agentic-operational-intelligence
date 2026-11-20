@@ -1,8 +1,8 @@
 {
-  "version": 2,
+  "version": 3,
   "calibration_seed_range": [
     0,
-    99
+    499
   ],
   "control_scenarios": [
     "healthy",
@@ -10,98 +10,207 @@
     "resolved_issue"
   ],
   "target_combined_alert_episodes_per_day": 0.1,
-  "per_method_tail_budget_per_day": 0.02,
+  "per_method_category_window_tail_budget": 0.00010416666666666667,
+  "arrival_models": [
+    "poisson",
+    "negative_binomial"
+  ],
+  "baseline_modes": [
+    "fixed",
+    "ewma"
+  ],
+  "ewma_lambda": 0.2,
   "method_thresholds": {
-    "poisson": {
-      "poisson_llr": 6.751416984838976,
-      "negative_binomial_llr": 5.018057117570848,
-      "standardized_residual": 4.643716460347528,
-      "cusum": 12.472067021300319,
-      "gamma_poisson_bayes_factor": 5.448981780027479
+    "fixed": {
+      "poisson": {
+        "poisson_llr": 7.542598391520905,
+        "negative_binomial_llr": 5.91656099018664,
+        "standardized_residual": 4.378802695198571,
+        "cusum": 19.168535854877586,
+        "gamma_poisson_bayes_factor": 5.93345744312172
+      },
+      "negative_binomial": {
+        "poisson_llr": 20.12797917133126,
+        "negative_binomial_llr": 8.700810025255054,
+        "standardized_residual": 5.3234489676234436,
+        "cusum": 14.135056473864166,
+        "gamma_poisson_bayes_factor": 18.29974743458504
+      }
     },
-    "negative_binomial": {
-      "poisson_llr": 19.26619370661671,
-      "negative_binomial_llr": 6.825187774943825,
-      "standardized_residual": 6.091953901645694,
-      "cusum": 15.636229462690451,
-      "gamma_poisson_bayes_factor": 17.03200223979763
+    "ewma": {
+      "poisson": {
+        "poisson_llr": 8.558164312667207,
+        "negative_binomial_llr": 5.919955829559883,
+        "standardized_residual": 4.698562756409687,
+        "cusum": 5.903794468284275,
+        "gamma_poisson_bayes_factor": 6.950881046731852
+      },
+      "negative_binomial": {
+        "poisson_llr": 23.59496272628603,
+        "negative_binomial_llr": 8.860620351639442,
+        "standardized_residual": 5.72584230180065,
+        "cusum": 7.242349763131261,
+        "gamma_poisson_bayes_factor": 21.707772659202572
+      }
     }
   },
   "thresholds": {
-    "poisson": {
-      "poisson_llr": 6.751416984838976,
-      "negative_binomial_llr": 5.018057117570848,
-      "standardized_residual": 4.643716460347528,
-      "cusum": 12.472067021300319,
-      "gamma_poisson_bayes_factor": 5.448981780027479
+    "fixed": {
+      "poisson": {
+        "poisson_llr": 7.542598391520905,
+        "negative_binomial_llr": 5.91656099018664,
+        "standardized_residual": 4.378802695198571,
+        "cusum": 19.168535854877586,
+        "gamma_poisson_bayes_factor": 5.93345744312172
+      },
+      "negative_binomial": {
+        "poisson_llr": 20.12797917133126,
+        "negative_binomial_llr": 8.700810025255054,
+        "standardized_residual": 5.3234489676234436,
+        "cusum": 14.135056473864166,
+        "gamma_poisson_bayes_factor": 18.29974743458504
+      }
     },
-    "negative_binomial": {
-      "poisson_llr": 19.26619370661671,
-      "negative_binomial_llr": 6.825187774943825,
-      "standardized_residual": 6.091953901645694,
-      "cusum": 15.636229462690451,
-      "gamma_poisson_bayes_factor": 17.03200223979763
+    "ewma": {
+      "poisson": {
+        "poisson_llr": 8.558164312667207,
+        "negative_binomial_llr": 5.919955829559883,
+        "standardized_residual": 4.698562756409687,
+        "cusum": 5.903794468284275,
+        "gamma_poisson_bayes_factor": 6.950881046731852
+      },
+      "negative_binomial": {
+        "poisson_llr": 23.59496272628603,
+        "negative_binomial_llr": 8.860620351639442,
+        "standardized_residual": 5.72584230180065,
+        "cusum": 7.242349763131261,
+        "gamma_poisson_bayes_factor": 21.707772659202572
+      }
     }
   },
   "category_thresholds": {
-    "poisson": {
-      "payments": {
-        "poisson_llr": 12.684944791559262,
-        "negative_binomial_llr": 6.015555784315195,
-        "standardized_residual": 8.326914194345946,
-        "cusum": 39.36198803664792,
-        "gamma_poisson_bayes_factor": 9.752260852744158
+    "fixed": {
+      "poisson": {
+        "payments": {
+          "poisson_llr": 9.752142590443176,
+          "negative_binomial_llr": 7.287396178812032,
+          "standardized_residual": 5.687223592854598,
+          "cusum": 15.181567914894064,
+          "gamma_poisson_bayes_factor": 8.252758651435482
+        },
+        "orders": {
+          "poisson_llr": 6.910999021210313,
+          "negative_binomial_llr": 4.784823686376556,
+          "standardized_residual": 4.481519429104668,
+          "cusum": 16.567176430481023,
+          "gamma_poisson_bayes_factor": 5.602509714293594
+        },
+        "account": {
+          "poisson_llr": 6.610248030530944,
+          "negative_binomial_llr": 5.079970941957229,
+          "standardized_residual": 4.635504635506954,
+          "cusum": 13.199211685446397,
+          "gamma_poisson_bayes_factor": 5.304419615991525
+        },
+        "delivery": {
+          "poisson_llr": 6.591048492474447,
+          "negative_binomial_llr": 5.18940147528646,
+          "standardized_residual": 4.442139472459584,
+          "cusum": 13.877739362858991,
+          "gamma_poisson_bayes_factor": 5.316762375054423
+        }
       },
-      "orders": {
-        "poisson_llr": 7.0319013915442445,
-        "negative_binomial_llr": 5.203467458131894,
-        "standardized_residual": 5.760221094612908,
-        "cusum": 9.959808282966733,
-        "gamma_poisson_bayes_factor": 5.013494016011598
-      },
-      "account": {
-        "poisson_llr": 6.921889793792509,
-        "negative_binomial_llr": 4.682709070236367,
-        "standardized_residual": 5.755014535836753,
-        "cusum": 12.669521403719775,
-        "gamma_poisson_bayes_factor": 4.945656681357827
-      },
-      "delivery": {
-        "poisson_llr": 6.605919244900578,
-        "negative_binomial_llr": 4.7256434269767595,
-        "standardized_residual": 5.5678099940713945,
-        "cusum": 16.94999498143096,
-        "gamma_poisson_bayes_factor": 4.747268849498557
+      "negative_binomial": {
+        "payments": {
+          "poisson_llr": 27.209192899392086,
+          "negative_binomial_llr": 9.812504801841692,
+          "standardized_residual": 7.504242778559627,
+          "cusum": 24.752303623700445,
+          "gamma_poisson_bayes_factor": 24.57448372303611
+        },
+        "orders": {
+          "poisson_llr": 30.040385698068306,
+          "negative_binomial_llr": 9.512119019673065,
+          "standardized_residual": 7.386309457908635,
+          "cusum": 18.500863715051516,
+          "gamma_poisson_bayes_factor": 27.390087947089405
+        },
+        "account": {
+          "poisson_llr": 16.27236379497171,
+          "negative_binomial_llr": 9.814350015846676,
+          "standardized_residual": 6.510111857222965,
+          "cusum": 19.808518485356373,
+          "gamma_poisson_bayes_factor": 14.043529662623941
+        },
+        "delivery": {
+          "poisson_llr": 23.38574382418731,
+          "negative_binomial_llr": 8.959511306070429,
+          "standardized_residual": 6.73008164962483,
+          "cusum": 25.862764607185124,
+          "gamma_poisson_bayes_factor": 21.07648516360795
+        }
       }
     },
-    "negative_binomial": {
-      "payments": {
-        "poisson_llr": 25.773883689286627,
-        "negative_binomial_llr": 8.467242892176403,
-        "standardized_residual": 11.214995292151714,
-        "cusum": 30.170543297940352,
-        "gamma_poisson_bayes_factor": 19.42773983922679
+    "ewma": {
+      "poisson": {
+        "payments": {
+          "poisson_llr": 11.057321430674323,
+          "negative_binomial_llr": 7.8668068329027045,
+          "standardized_residual": 6.281773935910343,
+          "cusum": 6.766602477173307,
+          "gamma_poisson_bayes_factor": 9.348488049600563
+        },
+        "orders": {
+          "poisson_llr": 8.355244040471645,
+          "negative_binomial_llr": 6.543800559835987,
+          "standardized_residual": 5.031075585934341,
+          "cusum": 6.009298206783689,
+          "gamma_poisson_bayes_factor": 6.958112715653994
+        },
+        "account": {
+          "poisson_llr": 8.229553701666084,
+          "negative_binomial_llr": 6.3464170077917315,
+          "standardized_residual": 5.4817597152968665,
+          "cusum": 6.217325818937629,
+          "gamma_poisson_bayes_factor": 6.634445568555536
+        },
+        "delivery": {
+          "poisson_llr": 7.911631933939106,
+          "negative_binomial_llr": 5.4714585426069045,
+          "standardized_residual": 5.148272783428374,
+          "cusum": 6.21194695965075,
+          "gamma_poisson_bayes_factor": 6.505451644883198
+        }
       },
-      "orders": {
-        "poisson_llr": 10.927438121123657,
-        "negative_binomial_llr": 7.676414840188009,
-        "standardized_residual": 7.268326590665243,
-        "cusum": 16.1726021023805,
-        "gamma_poisson_bayes_factor": 7.573802777711644
-      },
-      "account": {
-        "poisson_llr": 11.610280944534686,
-        "negative_binomial_llr": 7.32557748019309,
-        "standardized_residual": 7.383991759997513,
-        "cusum": 10.68704839739668,
-        "gamma_poisson_bayes_factor": 8.386636262858438
-      },
-      "delivery": {
-        "poisson_llr": 11.34815500672966,
-        "negative_binomial_llr": 7.010130715434429,
-        "standardized_residual": 7.319098772589683,
-        "cusum": 18.878172239444453,
-        "gamma_poisson_bayes_factor": 8.582232818887157
+      "negative_binomial": {
+        "payments": {
+          "poisson_llr": 29.988633232669372,
+          "negative_binomial_llr": 11.483214902896,
+          "standardized_residual": 8.874583153127876,
+          "cusum": 10.16767471474299,
+          "gamma_poisson_bayes_factor": 27.12325693499162
+        },
+        "orders": {
+          "poisson_llr": 27.80503108037796,
+          "negative_binomial_llr": 9.821984503452269,
+          "standardized_residual": 7.161711608309269,
+          "cusum": 8.50298909308494,
+          "gamma_poisson_bayes_factor": 25.17841428096938
+        },
+        "account": {
+          "poisson_llr": 19.972054824623054,
+          "negative_binomial_llr": 12.456595912750096,
+          "standardized_residual": 8.108779832848438,
+          "cusum": 9.52984247897519,
+          "gamma_poisson_bayes_factor": 16.910637615636336
+        },
+        "delivery": {
+          "poisson_llr": 28.59724963954915,
+          "negative_binomial_llr": 11.436099406616519,
+          "standardized_residual": 8.328035657394137,
+          "cusum": 8.699311919952953,
+          "gamma_poisson_bayes_factor": 25.719424161412444
+        }
       }
     }
   },
@@ -111,5 +220,5 @@
     "account",
     "delivery"
   ],
-  "note": "Empirical aggregate and category-specific thresholds from synthetic controls; re-calibrate when the generator or detector changes."
+  "note": "Empirical one-window thresholds allocated across five methods and four categories. Validate the combined episode rate on held-out control seeds; recalibrate when the generator or detector changes."
 }

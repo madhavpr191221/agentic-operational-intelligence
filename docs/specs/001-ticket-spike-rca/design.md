@@ -15,6 +15,8 @@
 
 For Poisson counts use the upward generalized log-likelihood ratio `x log(x / mu) - (x - mu)` for `x > mu`. For negative-binomial counts, compare the fitted upward alternative mean with the baseline mean using the NB log PMF. Standardized residuals use the model variance (Poisson `mu`; NB `mu + mu^2 / r`). CUSUM accumulates positive residual excess with a configurable reference allowance. The separate Gamma-Poisson Bayes factor compares a fixed baseline-rate null with a higher-rate Gamma prior alternative; its prior is fixed in configuration and never fitted on held-out data.
 
+The detector contract is one per-category count per 30-minute window; customer text and product evidence are unavailable to it. Calibration compares a frozen 48-window clean baseline with an EWMA initialized from the same windows (`lambda=0.2`), scoring before each update and freezing EWMA after an alert. The five score thresholds form a calibrated union rather than a vote. Consecutive firing windows form a statistical alert episode, which does not imply incident acknowledgement or service recovery. See [Experiment 003](../../experiments/003-count-only-alerting.md) for calibration and held-out acceptance criteria.
+
 ## Failure Handling
 
 - Run or stream failure leaves the run status inspectable and does not fabricate missing events.
