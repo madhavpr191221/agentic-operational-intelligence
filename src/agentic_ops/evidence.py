@@ -5,8 +5,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from agentic_ops.detectors import CountDetectorSuite, calibrated_config
 from agentic_ops.store import EventStore
+from agentic_ops.retrieval import HybridRetriever, LocalRAGModels
+from agentic_ops.search_corpus import CorpusSearch
 
 
 class EvidenceTools:
@@ -15,8 +16,43 @@ class EvidenceTools:
         "account": "account-api", "delivery": "delivery-api",
     }
 
-    def __init__(self, store: EventStore):
+    def __init__(self, store: EventStore, retriever: HybridRetriever | None = None,
+                 corpus: CorpusSearch | None = None):
         self.store = store
+        models = retriever.models if retriever is not None and retriever.models is not None else LocalRAGModels()
+        self.retriever = retriever or HybridRetriever(store, models=models)
+        self.corpus = corpus or CorpusSearch(models=models)
+
+    @staticmethod
+    def _dedupe(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        unique: list[dict[str, Any]] = []
+        evidence_ids: set[str] = set()
+        passage_keys: set[tuple[Any, ...]] = set()
+        for record in records:
+            evidence_id = str(record.get("evidence_id", ""))
+            payload = record.get("payload", {})
+            passage_key = (record.get("source"), payload.get("source_path"),
+                           payload.get("section_title"), payload.get("page_number"))
+            if evidence_id and evidence_id in evidence_ids:
+                continue
+            if payload.get("source_path") and passage_key in passage_keys:
+                continue
+            if evidence_id:
+                evidence_ids.add(evidence_id)
+            if payload.get("source_path"):
+                passage_keys.add(passage_key)
+            unique.append(record)
+        return unique
+
+    def _rank_with_corpus(self, records: list[dict[str, Any]], query: str, limit: int,
+                          sources: tuple[str, ...], category: str | None = None,
+                          start_at: str | None = None, end_at: str | None = None,
+                          service: str | None = None) -> list[dict[str, Any]]:
+        archived = self.corpus.search(query, cutoff=end_at, start_at=start_at,
+                                      sources=sources, category=category,
+                                      limit=max(40, limit * 5), rerank=False,
+                                      service=service)
+        return self._rank(self._dedupe([*records, *archived]), query, limit)
 
     @staticmethod
     def _focus_indices(observations_by_index: dict[int, dict[str, Any]],
@@ -254,53 +290,154 @@ class EvidenceTools:
         return {"alert_count": len(alerts), "alerts": [self._brief(e) for e in alerts[-5:]],
                 "latest_window": self._brief(latest) if latest else None, "evidence": evidence}
 
-    def run_anomaly_detection(self, run_id: str, window_index: int = -1,
-                              model: str = "poisson") -> dict[str, Any]:
-        run = self.store.get_run(run_id)
-        if run is None:
-            raise ValueError("Unknown run")
-        observations = self.store.search_events(run_id, ("detector",), limit=1000,
-                                               event_types=("window_observation",))
-        if not observations:
-            return {"error": "No completed windows are available yet.", "evidence": []}
-        warmup = int(run["config"].get("calibration_windows", 48))
-        suite = CountDetectorSuite(calibrated_config(model, warmup))
-        target = observations[-1] if window_index < 0 else next(
-            (event for event in observations if event["payload"].get("window_index") == window_index), None
-        )
-        if target is None:
-            return {"error": f"Window {window_index} is not available.", "evidence": []}
-        score_result = None
-        for event in observations:
-            scores, alert = suite.update(int(event["payload"]["ticket_count"]), int(event["payload"]["window_index"]))
-            if event["evidence_id"] == target["evidence_id"]:
-                score_result = {"window_index": event["payload"]["window_index"], "observed": event["payload"]["ticket_count"],
-                                "scores": [score.to_dict() for score in scores], "alert": alert}
-        return {"model": model, "result": score_result,
-                "evidence": [{"evidence_id": target["evidence_id"], "source": "detector",
-                              "observed_at": target["simulated_at"], "summary": "Observed ticket count for this window."}]}
-
     def search_tickets(self, run_id: str, query: str = "", limit: int = 20, category: str | None = None,
                        start_at: str | None = None, end_at: str | None = None) -> dict[str, Any]:
-        records = self.store.search_events(run_id, ("support_tickets",), query, limit,
+        records = self.store.search_events(run_id, ("support_tickets",), "", 1000,
                                            ("ticket_created",), start_at, end_at)
         if category:
             records = [item for item in records if item["payload"].get("category") == category]
+        records = self._rank(records, query, limit)
         return self._result(records, "tickets")
 
-    def search_issues(self, run_id: str, query: str = "", limit: int = 20) -> dict[str, Any]:
-        return self._result(self.store.search_events(run_id, ("issue_tracker",), query, limit), "issues")
+    def search_issues(self, run_id: str, query: str = "", limit: int = 20,
+                      end_at: str | None = None,
+                      category: str | None = None) -> dict[str, Any]:
+        records = self.store.search_events(run_id, ("issue_tracker",), "", 1000,
+                                           start_at=None, end_at=end_at)
+        if category:
+            expected_service = self._SERVICE_BY_CATEGORY.get(category)
+            records = [item for item in records
+                       if item["payload"].get("category") == category
+                       or (not item["payload"].get("category") and
+                           item["payload"].get("service") == expected_service)]
+        ranked = self._rank_with_corpus(records, query, limit, ("issue_tracker",),
+                                        category=category, end_at=end_at)
+        return self._result(ranked, "issues")
 
     def search_product_logs(self, run_id: str, query: str = "", limit: int = 20,
                             start_at: str | None = None, end_at: str | None = None) -> dict[str, Any]:
-        return self._result(self.store.search_events(run_id, ("product_logs",), query, limit,
-                                                     ("service_log_summary",), start_at, end_at), "logs")
+        records = self.store.search_events(run_id, ("product_logs",), "", 1000,
+                                           ("service_log_summary",), start_at, end_at)
+        # Logs are structured telemetry: keep service matching exact/lexical rather than semantic.
+        if query.strip():
+            records = [record for record in records
+                       if query.casefold() in str(record["payload"].get("service", "")).casefold()
+                       or query.casefold() in str(record["payload"].get("message", "")).casefold()]
+        category = next((name for name, service in self._SERVICE_BY_CATEGORY.items()
+                         if service.casefold() == query.casefold()), None)
+        archived = self.corpus.search_structured(
+            query=query, sources=("product_logs",), cutoff=end_at, start_at=start_at,
+            category=category, service=query if query else None, limit=max(1, limit))
+        ranked = self._dedupe([*records, *archived])
+        ranked.sort(key=lambda item: item.get("simulated_at", ""), reverse=True)
+        return self._result(ranked[:max(1, limit)], "logs")
 
     def list_changes(self, run_id: str, service: str = "", limit: int = 20,
                      start_at: str | None = None, end_at: str | None = None) -> dict[str, Any]:
-        records = self.store.search_events(run_id, ("change_log",), service, limit,
+        records = self.store.search_events(run_id, ("change_log",), "", 1000,
                                            ("change_record",), start_at, end_at)
-        return self._result(records, "changes")
+        if service.strip():
+            records = [record for record in records if service.casefold() in
+                       str(record["payload"].get("service", "")).casefold()]
+        ranked = self._rank_with_corpus(records, service or "recent service change", limit,
+                                        ("change_log",), start_at=start_at, end_at=end_at,
+                                        service=service or None)
+        return self._result(ranked, "changes")
+
+    def search_related_evidence(self, run_id: str, query: str, category: str,
+                                start_at: str | None, end_at: str | None,
+                                limit: int = 8) -> dict[str, Any]:
+        """Hybrid-search ticket, issue, and change text without crossing the time cutoff."""
+        records = self.store.search_events(run_id, ("support_tickets", "issue_tracker", "change_log"),
+                                           "", 1000, start_at=start_at, end_at=end_at)
+        records = [item for item in records if item["source"] != "support_tickets"
+                   or item["payload"].get("category") == category]
+        ranked = self._rank_with_corpus(records, query, limit,
+                                        ("support_tickets", "issue_tracker", "change_log"),
+                                        category, start_at, end_at)
+        return self._result(ranked, "records")
+
+    def search_operational_docs(self, run_id: str, query: str, category: str,
+                                end_at: str | None = None,
+                                limit: int = 8) -> dict[str, Any]:
+        """Search runbooks and dated reference passages available at the alert cutoff."""
+        runbook_by_category = {"payments": "payments", "orders": "orders", "delivery": "delivery",
+                               "account": "incident_response"}
+        records = self.store.search_events(run_id, ("runbooks", "knowledge_docs"), "", 500,
+                                           ("runbook_page", "document_passage"), end_at=end_at)
+        selected_runbook = runbook_by_category.get(category)
+        records = [item for item in records if (
+            item["source"] == "runbooks"
+            and item["payload"].get("runbook_id") in {selected_runbook, "incident_response"}
+        ) or (
+            item["source"] == "knowledge_docs"
+            and (not item["payload"].get("categories")
+                 or category in item["payload"].get("categories", []))
+        )]
+        archived = self.corpus.search(query, cutoff=end_at,
+                                      sources=("runbooks", "knowledge_docs"), category=category,
+                                      limit=max(40, limit * 5), rerank=False)
+        records = self._dedupe([*records, *archived])
+        return self._result(self._rank(records, query, limit), "passages")
+
+    def search_runbooks(self, run_id: str, query: str, category: str,
+                        limit: int = 5) -> dict[str, Any]:
+        """Backward-compatible alias for operational-document retrieval."""
+        return self.search_operational_docs(run_id, query, category, limit=limit)
+
+    def compare_ticket_themes(self, run_id: str, category: str, start_window_index: int,
+                              end_window_index: int) -> dict[str, Any]:
+        """Compare customer-reason themes during the episode with an equal-length baseline."""
+        observations = self.store.search_events(run_id, ("detector",), limit=1000,
+                                                event_types=("window_observation",))
+        by_index = {int(item["payload"]["window_index"]): item["payload"] for item in observations}
+        if start_window_index not in by_index or end_window_index not in by_index:
+            return {"category": category, "themes": [], "error": "Window observations are incomplete."}
+        baseline_start_index = max(0, start_window_index - (end_window_index - start_window_index + 1))
+        baseline_start = str(by_index[baseline_start_index]["window_start"])
+        episode_start = str(by_index[start_window_index]["window_start"])
+        episode_end = str(by_index[end_window_index]["window_end"])
+        tickets = self.store.search_events(run_id, ("support_tickets",), "", 1000,
+                                           ("ticket_created",), baseline_start, episode_end)
+        baseline = [item for item in tickets if item["simulated_at"] < episode_start
+                    and item["payload"].get("category") == category]
+        incident = [item for item in tickets if episode_start <= item["simulated_at"] < episode_end
+                    and item["payload"].get("category") == category]
+        before_counts: dict[str, int] = {}
+        during_counts: dict[str, int] = {}
+        examples: dict[str, dict[str, Any]] = {}
+        for item in baseline:
+            reason = str(item["payload"].get("reason", "other"))
+            before_counts[reason] = before_counts.get(reason, 0) + 1
+        for item in incident:
+            reason = str(item["payload"].get("reason", "other"))
+            during_counts[reason] = during_counts.get(reason, 0) + 1
+            examples.setdefault(reason, item)
+        themes = []
+        for reason in sorted(set(before_counts) | set(during_counts),
+                             key=lambda key: (during_counts.get(key, 0) / max(1, len(incident))
+                                              - before_counts.get(key, 0) / max(1, len(baseline))),
+                             reverse=True):
+            before_share = before_counts.get(reason, 0) / max(1, len(baseline))
+            during_share = during_counts.get(reason, 0) / max(1, len(incident))
+            themes.append({"theme": reason.replace("_", " "),
+                           "baseline_count": before_counts.get(reason, 0),
+                           "baseline_share": round(before_share, 4),
+                           "episode_count": during_counts.get(reason, 0),
+                           "episode_share": round(during_share, 4),
+                           "share_change": round(during_share - before_share, 4),
+                           "example": self._brief(examples[reason]) if reason in examples else None})
+        return {"category": category,
+                "baseline_interval": {"start_at": baseline_start, "end_at": episode_start,
+                                      "ticket_count": len(baseline)},
+                "episode_interval": {"start_at": episode_start, "end_at": episode_end,
+                                     "ticket_count": len(incident)},
+                "themes": themes, "evidence": [item["example"] for item in themes if item.get("example")]}
+
+    def _rank(self, records: list[dict[str, Any]], query: str, limit: int) -> list[dict[str, Any]]:
+        if not query.strip():
+            return records[-limit:]
+        return self.retriever.rank(records, query, limit)
 
     def compare_categories(self, run_id: str, window_index: int,
                            end_window_index: int | None = None) -> dict[str, Any]:
@@ -481,45 +618,48 @@ class EvidenceTools:
                                 evidence_ids: list[str] | None = None) -> dict[str, Any]:
         """Return non-executing next steps only when supplied evidence supports a relevant runbook."""
         records = self.store.get_events_by_evidence_ids(run_id, (evidence_ids or [])[:20])
-        selected = [item for item in records if
-                    (item["source"] == "support_tickets" and item["payload"].get("category") == category)
-                    or category.rstrip("s") in str(item["payload"]).casefold()
-                    or self._SERVICE_BY_CATEGORY.get(category, "").casefold() in str(item["payload"]).casefold()]
-        latest_issue_state: dict[str, str] = {}
-        for item in selected:
-            if item["source"] == "issue_tracker":
-                key = str(item["payload"].get("issue_key", item["evidence_id"]))
-                latest_issue_state[key] = str(item["payload"].get("status", "unknown"))
-        active_payment_issue = any(status == "open" for status in latest_issue_state.values())
-        payment_errors = any(item["source"] == "product_logs"
-                             and item["payload"].get("errors", 0) > 0 for item in selected)
-        if category == "payments" and active_payment_issue and payment_errors:
-            has_change = any(item["source"] == "change_log" for item in selected)
-            action = {"runbook_id": "RB-PAY-01", "title": "Review payment authorization failures",
-                      "next_step": ("Compare current gateway retry settings with the cited recent change; follow the team's payment runbook to decide whether rollback or escalation is appropriate."
-                                    if has_change else
-                                    "Have the payments owner review the open issue and error logs against the payment runbook before deciding on remediation."),
-                      "verification": "Check authorization error rate and payment ticket arrivals after any approved change.",
-                      "evidence_ids": [item["evidence_id"] for item in selected]}
-        elif selected and category != "payments":
-            action = {"runbook_id": f"RB-{category.upper()}-01", "title": f"Inspect the {category} service",
-                      "next_step": f"Have the owning team review the cited {category} records and its current runbook before changing configuration.",
-                      "verification": "Confirm the relevant service metric returns to its expected range and customer contacts decline.",
-                      "evidence_ids": [item["evidence_id"] for item in selected]}
+        runbook_ids = {"payments": "payments", "orders": "orders", "delivery": "delivery",
+                       "account": "incident_response"}
+        runbook = next((item for item in records if item["source"] == "runbooks"
+                        and item["payload"].get("runbook_id") == runbook_ids.get(category)), None)
+        relevant = [item for item in records if item["source"] != "runbooks" and (
+            (item["source"] == "support_tickets" and item["payload"].get("category") == category)
+            or self._SERVICE_BY_CATEGORY.get(category, "").casefold() in str(item["payload"]).casefold())]
+        failing_service_logs = [item for item in relevant if item["source"] == "product_logs"
+                                and item["payload"].get("errors", 0) > 0]
+        matching_issue = any(item["source"] == "issue_tracker" for item in relevant)
+        if runbook and relevant and (failing_service_logs or matching_issue):
+            payload = runbook["payload"]
+            action = {"runbook_id": f"RB-{category[:3].upper()}-01",
+                      "title": f"Review the {category} runbook",
+                      "next_step": (f"Have the {category} owner follow the documented first checks using the cited service evidence; do not change production settings without the normal approval."
+                                    if failing_service_logs else
+                                    f"Have the {category} owner compare the cited issue and customer reports with the runbook checks before choosing a remediation."),
+                      "verification": "Check the documented service measure and category ticket arrivals over two consecutive 30-minute windows.",
+                      "evidence_ids": [runbook["evidence_id"], *[item["evidence_id"] for item in relevant[:8]]],
+                      "runbook_page": payload.get("page_number"), "runbook_title": payload.get("title")}
         else:
             action = {"runbook_id": None, "title": "Gather more evidence",
                       "next_step": f"Collect time-matched service logs and issue/change records for {category} before recommending a remediation.",
                       "verification": "Re-run the investigation when time-aligned evidence is available.",
                       "evidence_ids": []}
         return {"category": category, "actions": [action],
-                "evidence": [self._brief(item) for item in selected]}
+                "evidence": [self._brief(item) for item in records]}
 
     @staticmethod
     def _brief(event: dict[str, Any] | None) -> dict[str, Any] | None:
         if event is None:
             return None
         return {"evidence_id": event["evidence_id"], "observed_at": event["simulated_at"],
-                "source": event["source"], "event_type": event["event_type"], "payload": event["payload"]}
+                "source": event["source"], "event_type": event["event_type"], "payload": event["payload"],
+                **({"retrieval": event["retrieval"]} if event.get("retrieval") else {}),
+                **({"available_at": event["available_at"]} if event.get("available_at") else {}),
+                **({"summary": event["payload"].get("text", ""),
+                   "page_number": event["payload"].get("page_number"),
+                   "source_path": event["payload"].get("source_path"),
+                   "section_title": event["payload"].get("section_title"),
+                   "document_type": event["payload"].get("document_type")}
+                   if event["source"] in {"runbooks", "knowledge_docs"} else {})}
 
     @classmethod
     def _result(cls, records: list[dict[str, Any]], label: str) -> dict[str, Any]:

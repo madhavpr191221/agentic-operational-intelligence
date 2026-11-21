@@ -1,5 +1,7 @@
 # Experiment 001: Initial Detector Evaluation
 
+> Historical result for the earlier total-count simulator. The current per-category count-only design and acceptance evaluation are documented in [Experiment 003](003-count-only-alerting.md), with held-out results in `003-count-alert-evaluation-results.json`.
+
 ## Setup
 
 - Generator: 72 simulated hours in 30-minute ticket windows; first 24 hours are baseline warmup.

@@ -21,7 +21,8 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(client.get("/api/health").json(), {"status": "ok"})
             scenarios = client.get("/api/scenarios").json()
             self.assertEqual({item["id"] for item in scenarios},
-                             {"payment_issue", "healthy", "unrelated_issue", "resolved_issue"})
+                             {"payment_issue", "healthy", "unrelated_issue", "resolved_issue",
+                              "orders_queue_backlog", "delivery_carrier_degradation"})
 
 
 if __name__ == "__main__":

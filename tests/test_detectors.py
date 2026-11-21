@@ -1,8 +1,11 @@
 import math
 import unittest
 
-from agentic_ops.detectors import (
+from agentic_ops.detection import (
+    AlertEpisodeTracker,
+    CategoryDetectorSuite,
     CountDetectorSuite,
+    CountObservation,
     DetectorConfig,
     gamma_poisson_log_bayes_factor,
     negative_binomial_log_likelihood_ratio,
@@ -50,6 +53,70 @@ class DetectorTests(unittest.TestCase):
             states.append(next(score.score for score in scores if score.detector == "cusum"))
         self.assertTrue(all(a < b for a, b in zip(states, states[1:])))
         self.assertGreater(states[-1], 5.0)
+
+    def test_ewma_scores_before_updating_and_uses_lambda(self):
+        suite = CountDetectorSuite(DetectorConfig(
+            warmup_windows=4, baseline_mode="ewma", ewma_lambda=0.2,
+            poisson_llr_threshold=math.inf, negative_binomial_llr_threshold=math.inf,
+            residual_threshold=math.inf, cusum_threshold=math.inf,
+            log_bayes_factor_threshold=math.inf,
+        ))
+        for index in range(4):
+            suite.update(5, index)
+        scores, alerted = suite.update(10, 4)
+        self.assertFalse(alerted)
+        self.assertEqual(scores[0].expected, 5.0)
+        self.assertEqual(suite.expected, 6.0)
+        next_scores, _ = suite.update(6, 5)
+        self.assertEqual(next_scores[0].expected, 6.0)
+
+    def test_ewma_freezes_when_combined_alert_fires(self):
+        suite = CountDetectorSuite(DetectorConfig(
+            warmup_windows=4, baseline_mode="ewma", ewma_lambda=0.2,
+            poisson_llr_threshold=math.inf, negative_binomial_llr_threshold=math.inf,
+            residual_threshold=1.0, cusum_threshold=math.inf,
+            log_bayes_factor_threshold=math.inf,
+        ))
+        for index in range(4):
+            suite.update(5, index)
+        _, alerted = suite.update(20, 4)
+        self.assertTrue(alerted)
+        self.assertTrue(suite.baseline_frozen)
+        self.assertEqual(suite.expected, 5.0)
+        suite.update(6, 5)
+        self.assertEqual(suite.expected, 5.0)
+
+    def test_category_detector_accepts_count_vector_only(self):
+        suite = CategoryDetectorSuite("poisson", warmup_windows=2,
+                                      categories=("payments", "orders", "account", "delivery"))
+        observation = CountObservation(0, "2026-01-01T00:00:00Z", "2026-01-01T00:30:00Z",
+                                       {"payments": 5, "orders": 8, "account": 4, "delivery": 6})
+        result = suite.update(observation)
+        self.assertEqual(set(result.categories), {"payments", "orders", "account", "delivery"})
+        self.assertEqual(result.to_dict()["schema_version"], 1)
+        self.assertEqual(result.to_dict()["window_start"], observation.window_start)
+        with self.assertRaisesRegex(ValueError, "Unknown ticket categories"):
+            suite.update(CountObservation(1, "2026-01-01T00:30:00Z", "2026-01-01T01:00:00Z",
+                                          {"payments": 5, "customer_text": 2}))
+
+    def test_count_observation_rejects_negative_values_and_extra_evidence(self):
+        with self.assertRaisesRegex(ValueError, "cannot be negative"):
+            CountObservation(0, "start", "end", {"payments": -1})
+        with self.assertRaisesRegex(TypeError, "must be integers"):
+            CountObservation(0, "start", "end", {"payments": 1.5})
+        with self.assertRaises(TypeError):
+            CountObservation(0, "start", "end", {"payments": 1}, ticket_text="failure")
+
+    def test_alert_episode_groups_only_consecutive_statistical_crossings(self):
+        tracker = AlertEpisodeTracker()
+        first = tracker.update("payments", 10, 12, True)
+        second = tracker.update("payments", 11, 19, True)
+        self.assertEqual(first["episode_id"], second["episode_id"])
+        self.assertEqual(second["window_count"], 2)
+        self.assertEqual(second["peak_window"], 11)
+        self.assertIsNone(tracker.update("payments", 12, 4, False))
+        later = tracker.update("payments", 13, 15, True)
+        self.assertNotEqual(first["episode_id"], later["episode_id"])
 
 
 if __name__ == "__main__":

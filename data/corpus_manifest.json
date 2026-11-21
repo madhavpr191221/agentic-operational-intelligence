@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "seed": 42,
+  "archive_start": "2025-10-01T00:00:00Z",
+  "archive_days": 92,
+  "structured_record_count": 20000,
+  "record_counts_by_source": {
+    "change_log": 1000,
+    "issue_tracker": 1000,
+    "product_logs": 14000,
+    "support_tickets": 4000
+  },
+  "generated_markdown_documents": 400,
+  "sections_per_document": 10,
+  "search_queries": 104,
+  "data_is_synthetic": true
+}

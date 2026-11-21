@@ -6,8 +6,14 @@ import math
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
-from agentic_ops.domain import CATEGORIES, Score
+from agentic_ops.detection.contracts import (
+    CategoryDetection,
+    CountObservation,
+    DetectionResult,
+    Score,
+)
 
 
 def poisson_log_likelihood_ratio(observed: int, expected: float) -> float:
@@ -68,19 +74,36 @@ class DetectorConfig:
     log_bayes_factor_threshold: float = math.log(10.0)
     fallback_nb_shape: float = 4.0
     score_model: str = "poisson"
+    baseline_mode: str = "fixed"
+    ewma_lambda: float = 0.2
+
+    def __post_init__(self) -> None:
+        if self.baseline_mode not in {"fixed", "ewma"}:
+            raise ValueError("baseline_mode must be 'fixed' or 'ewma'")
+        if not 0.0 < self.ewma_lambda <= 1.0:
+            raise ValueError("ewma_lambda must be in (0, 1]")
 
 
 def calibrated_config(model: str, warmup_windows: int = 48,
-                     thresholds_path: str | Path | None = None,
-                     category: str | None = None) -> DetectorConfig:
+                      thresholds_path: str | Path | None = None,
+                      category: str | None = None,
+                      baseline_mode: str = "fixed") -> DetectorConfig:
     """Load model-specific thresholds produced by the calibration script."""
-    path = Path(thresholds_path) if thresholds_path else Path(__file__).resolve().parents[2] / "configs" / "detector_thresholds.json"
+    path = (Path(thresholds_path) if thresholds_path else
+            Path(__file__).resolve().parents[3] / "configs" / "detector_thresholds.json")
     values: dict[str, float] = {}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        values = payload.get("thresholds", {}).get(model, {})
+        thresholds = payload.get("thresholds", {})
+        model_values = thresholds.get(baseline_mode, {}).get(model)
+        if model_values is None:
+            model_values = thresholds.get(model, {})
+        values = model_values or {}
         if category:
-            values = payload.get("category_thresholds", {}).get(model, {}).get(category, values)
+            category_values = payload.get("category_thresholds", {}).get(baseline_mode, {}).get(model)
+            if category_values is None:
+                category_values = payload.get("category_thresholds", {}).get(model, {})
+            values = (category_values or {}).get(category, values)
     except (OSError, json.JSONDecodeError):
         values = {}
     return DetectorConfig(
@@ -91,6 +114,7 @@ def calibrated_config(model: str, warmup_windows: int = 48,
         residual_threshold=float(values.get("standardized_residual", 3.0)),
         cusum_threshold=float(values.get("cusum", 5.0)),
         log_bayes_factor_threshold=float(values.get("gamma_poisson_bayes_factor", math.log(10.0))),
+        baseline_mode=baseline_mode,
     )
 
 
@@ -103,6 +127,7 @@ class CountDetectorSuite:
         self.expected = 0.0
         self.nb_shape = self.config.fallback_nb_shape
         self.cusum = 0.0
+        self.baseline_frozen = False
 
     def update(self, observed: int, index: int) -> tuple[list[Score], bool]:
         if observed < 0:
@@ -119,53 +144,123 @@ class CountDetectorSuite:
                 if excess > 1e-9:
                     self.nb_shape = min(1000.0, max(0.25, self.expected**2 / excess))
 
-        poisson_score = poisson_log_likelihood_ratio(observed, self.expected)
-        nb_score = negative_binomial_log_likelihood_ratio(observed, self.expected, self.nb_shape)
-        poisson_z = standardized_residual(observed, self.expected, self.expected)
-        nb_variance = self.expected + self.expected**2 / self.nb_shape
-        nb_z = standardized_residual(observed, self.expected, nb_variance)
+        expected = self.expected
+        poisson_score = poisson_log_likelihood_ratio(observed, expected)
+        nb_score = negative_binomial_log_likelihood_ratio(observed, expected, self.nb_shape)
+        poisson_z = standardized_residual(observed, expected, expected)
+        nb_variance = expected + expected**2 / self.nb_shape
+        nb_z = standardized_residual(observed, expected, nb_variance)
         active_z = nb_z if self.config.score_model == "negative_binomial" else poisson_z
         self.cusum = max(0.0, self.cusum + active_z - self.config.cusum_reference)
-        bayes = gamma_poisson_log_bayes_factor(observed, max(self.expected, 0.05))
+        bayes = gamma_poisson_log_bayes_factor(observed, max(expected, 0.05))
 
         scores = [
             Score("poisson_llr", "log_likelihood_ratio", poisson_score, self.config.poisson_llr_threshold,
-                  self.expected, observed, poisson_score >= self.config.poisson_llr_threshold,
+                  expected, observed, poisson_score >= self.config.poisson_llr_threshold,
                   "One-sided Poisson rate-increase evidence; this is not a Bayes factor."),
             Score("negative_binomial_llr", "log_likelihood_ratio", nb_score,
-                  self.config.negative_binomial_llr_threshold, self.expected, observed,
+                  self.config.negative_binomial_llr_threshold, expected, observed,
                   nb_score >= self.config.negative_binomial_llr_threshold,
                   f"NB upward likelihood ratio; fitted baseline shape r={self.nb_shape:.3g}."),
             Score("standardized_residual",
                   "z_score_negative_binomial" if self.config.score_model == "negative_binomial" else "z_score_poisson",
                   active_z, self.config.residual_threshold,
-                  self.expected, observed, active_z >= self.config.residual_threshold,
+                  expected, observed, active_z >= self.config.residual_threshold,
                   f"{self.config.score_model} model residual; threshold is calibrated empirically."),
             Score("cusum", "positive_cusum", self.cusum, self.config.cusum_threshold,
-                  self.expected, observed, self.cusum >= self.config.cusum_threshold,
+                  expected, observed, self.cusum >= self.config.cusum_threshold,
                   f"Accumulated positive {self.config.score_model} residual excess."),
             Score("gamma_poisson_bayes_factor", "log_bayes_factor", bayes,
-                  self.config.log_bayes_factor_threshold, self.expected, observed,
+                  self.config.log_bayes_factor_threshold, expected, observed,
                   bayes >= self.config.log_bayes_factor_threshold,
                   "Gamma-Poisson prior predictive comparison; alternative prior mean is 2x baseline."),
         ]
-        return scores, any(score.anomalous for score in scores)
+        alerted = any(score.anomalous for score in scores)
+        if alerted:
+            self.baseline_frozen = True
+        elif self.config.baseline_mode == "ewma" and not self.baseline_frozen:
+            # Score against the prior estimate, then update it for the next
+            # window. A detected shift cannot train itself into the baseline.
+            weight = self.config.ewma_lambda
+            self.expected = weight * observed + (1.0 - weight) * expected
+        return scores, alerted
 
 
 class CategoryDetectorSuite:
     """Independent count detector state for each support category."""
 
-    def __init__(self, model: str, warmup_windows: int):
+    def __init__(self, model: str, warmup_windows: int, categories: Sequence[str],
+                 baseline_mode: str = "fixed",
+                 thresholds_path: str | Path | None = None):
+        if baseline_mode not in {"fixed", "ewma"}:
+            raise ValueError("baseline_mode must be 'fixed' or 'ewma'")
+        if not categories or len(set(categories)) != len(categories):
+            raise ValueError("categories must be a non-empty sequence of unique names")
+        self.categories = tuple(categories)
         self.suites = {
-            category: CountDetectorSuite(calibrated_config(model, warmup_windows, category=category))
-            for category in CATEGORIES
+            category: CountDetectorSuite(calibrated_config(
+                model, warmup_windows, thresholds_path, category, baseline_mode
+            ))
+            for category in self.categories
         }
 
-    def update(self, category_counts: dict[str, int], index: int) -> dict[str, tuple[list[Score], bool]]:
-        unknown = set(category_counts) - set(self.suites)
+    def update(self, observation: CountObservation) -> DetectionResult:
+        """Score only the category counts from the supplied observation."""
+        unknown = set(observation.category_counts) - set(self.suites)
         if unknown:
             raise ValueError(f"Unknown ticket categories: {', '.join(sorted(unknown))}")
-        return {
-            category: suite.update(int(category_counts.get(category, 0)), index)
+        categories = {
+            category: CategoryDetection(
+                category=category,
+                observed=int(observation.category_counts.get(category, 0)),
+                expected=(scores[0].expected if scores else None),
+                scores=tuple(scores),
+                alerted=alerted,
+            )
             for category, suite in self.suites.items()
+            for scores, alerted in [suite.update(
+                int(observation.category_counts.get(category, 0)), observation.window_index
+            )]
         }
+        return DetectionResult(
+            window_index=observation.window_index,
+            window_start=observation.window_start,
+            window_end=observation.window_end,
+            categories=categories,
+        )
+
+
+class AlertEpisodeTracker:
+    """Group consecutive threshold crossings for each category.
+
+    Episodes here describe statistical alert continuity only. A quiet window
+    ends the grouping period; this does not represent service recovery.
+    """
+
+    def __init__(self) -> None:
+        self._active: dict[str, dict[str, int | str]] = {}
+
+    def update(self, category: str, index: int, observed: int, alerted: bool) -> dict[str, int | str] | None:
+        if not alerted:
+            self._active.pop(category, None)
+            return None
+
+        episode = self._active.get(category)
+        if episode is None or int(episode["latest_window"]) != index - 1:
+            episode = {
+                "episode_id": f"{category}:{index}",
+                "category": category,
+                "start_window": index,
+                "latest_window": index,
+                "window_count": 1,
+                "peak_window": index,
+                "peak_ticket_count": observed,
+            }
+        else:
+            episode["latest_window"] = index
+            episode["window_count"] = int(episode["window_count"]) + 1
+            if observed > int(episode["peak_ticket_count"]):
+                episode["peak_window"] = index
+                episode["peak_ticket_count"] = observed
+        self._active[category] = episode
+        return dict(episode)

@@ -18,7 +18,8 @@ Speed = Literal["slow", "normal", "fast"]
 
 
 class RunRequest(BaseModel):
-    scenario: Literal["payment_issue", "healthy", "unrelated_issue", "resolved_issue"] = "payment_issue"
+    scenario: Literal["payment_issue", "healthy", "unrelated_issue", "resolved_issue",
+                      "orders_queue_backlog", "delivery_carrier_degradation"] = "payment_issue"
     seed: int = 42
     arrival_model: Literal["poisson", "negative_binomial"] = "poisson"
     speed: Speed = "normal"
@@ -53,6 +54,8 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
             {"id": "healthy", "label": "Healthy control"},
             {"id": "unrelated_issue", "label": "Unrelated issue distractor"},
             {"id": "resolved_issue", "label": "Resolved payment issue"},
+            {"id": "orders_queue_backlog", "label": "Order processing backlog"},
+            {"id": "delivery_carrier_degradation", "label": "Carrier service degradation"},
         ]
 
     @app.get("/api/runs")

@@ -4,17 +4,41 @@ A local, fictional operations-intelligence demo that detects category-specific s
 
 ## What the demo includes
 
-- A seeded 72-hour simulator for payment failures and healthy, unrelated-issue, and resolved-issue controls, with payments, orders, account, and delivery categories.
+- A seeded 72-hour simulator for payment authorization, order-queue, and carrier-service incidents, plus healthy, unrelated-change, and resolved-issue controls.
 - Poisson and negative-binomial ticket arrivals, scored with likelihood ratios, standardized residuals, upward CUSUM, and a Gamma–Poisson Bayes factor.
 - Synthetic, read-only evidence tools and an operator-triggered investigation that returns cited hypotheses.
 - One synthetic customer message per ticket, with observable reason, category, channel, and timestamp fields. Each message is the ticket record counted by the detector; no-contact customers are outside this dataset.
 - Deterministic investigator tools compare categories, rank ticket reasons/channels, build an incident timeline, and compare before/after ticket and service-error rates.
+- Customer-message themes are compared with an equal-length pre-incident baseline. Text searches use keyword and semantic similarity; service logs use structured fields and a strict investigation-time cutoff.
+- Four fictional runbooks have editable Markdown sources and searchable text PDFs. Service and dependency guidance, historical postmortems, and deployment guidance are additional searchable Markdown documents. Citations identify the source path and page or section.
 - Evidence-grounded fictional runbook suggestions include a verification check and never execute operational changes.
 - Empirically calibrated category-specific detector thresholds and held-out detector evaluation.
 - Four category charts, consecutive alert episodes, selectable focus windows, event timelines, category reports, and light/dark themes.
 - Joint focus-window analysis in chronological order: T-2, T-1, T, and T+1 when available, with exact UTC intervals, ticket counts, service errors, and scoped citations.
 
-All records are generated locally from a reproducible seed. No external incident data is needed.
+All incident, ticket, service, issue, and change records are fictional and generated from a reproducible seed. No external incident data is needed.
+
+### Synthetic evidence corpus and retrieval
+
+Each support interaction is one ticket and contributes exactly one to its category count. The simulator uses separate seeded random streams for counts, event evidence, and wording, so editing customer language does not change detector inputs. The new scenarios add an order-worker backlog and a carrier API degradation; their ticket text is varied and noisy, while service logs and issue records carry separate corroborating evidence. Incident scenarios also include a nearby catalog-search change as an innocent distractor. The hidden scenario truth remains in an evaluator-only table.
+
+The evidence world has several source types rather than one collection of PDFs: customer tickets, structured service logs, Jira-like issue histories, deployment/change records, four runbooks, service/dependency guidance, historical postmortems, and prior deployment notes. Tickets, logs, issues, and changes remain structured records; they are not duplicated as documents. Markdown is the editable source for reference documents. Runbook PDFs are retained for page-level citations; Markdown sources cite their file and section.
+
+The archive contains 20,000 structured records (4,000 tickets, 14,000 service-log summaries, 1,000 issue records, and 1,000 change records) plus 400 generated Markdown references with 10 sections each. These are synthetic, seeded records; the full generated archive and index are stored under ignored `.data/`. A small sample and manifest are tracked under `data/` for inspection.
+
+Text retrieval runs locally on the NVIDIA GPU. It uses `sentence-transformers/all-MiniLM-L6-v2` for embeddings, section-aware chunks of up to 240 model tokens with 36-token overlap (below the model's 256-token input limit), SQLite FTS5 and USearch HNSW for keyword and vector candidates, reciprocal-rank fusion, and `cross-encoder/ms-marco-MiniLM-L6-v2` to rerank the best candidates. Product logs stay structured and are filtered by service, category, and time rather than embedded. All time-varying sources are filtered by the investigation cutoff. The first setup downloads the two models from Hugging Face; no OpenAI embedding calls are made. OpenAI is used only when the live investigator runs.
+
+The search evaluator uses 104 seeded, paraphrased queries with known relevant record IDs. It reports hit rate, mean reciprocal rank, and normalized discounted cumulative gain at 10, before and after reranking. This is a synthetic retrieval check, not evidence of production search quality; the seed-42 result is recorded [here](docs/results/local-rag-search-seed-42.json). See [the local hybrid RAG design](docs/design/local-hybrid-rag.md) for details and limitations.
+
+All time-varying searches stop at the selected investigation cutoff; runbooks are static references. To regenerate the searchable PDF assets after editing their Markdown sources:
+
+```powershell
+uv run python scripts/build_runbooks.py
+```
+
+## Detection and investigation are separate
+
+The statistical detector receives only timestamped per-category ticket counts. It emits versioned scores and alert events; it does not read ticket text, product logs, issues, or changes. The investigator runs only after an operator requests an investigation. It reads the persisted alert and uses evidence tools, but cannot import or recompute detector logic. This keeps alert quality measurable independently from the quality of the RCA explanation.
 
 ## Requirements
 
@@ -24,11 +48,27 @@ All records are generated locally from a reproducible seed. No external incident
 
 ## Run locally (PowerShell)
 
-Install the locked Python dependencies:
+Install the locked Python dependencies, including the local GPU search stack:
 
 ```powershell
-uv sync --locked
+uv sync --locked --extra rag-gpu
 ```
+
+Verify that PyTorch can use the NVIDIA GPU and both local models run:
+
+```powershell
+uv run python scripts/check_gpu.py
+```
+
+Generate the local archive and build its search index once (and again after changing the generator or source documents):
+
+```powershell
+uv run python scripts/generate_search_corpus.py --seed 42
+uv run python scripts/build_search_index.py
+uv run python scripts/evaluate_search.py
+```
+
+The model files are downloaded on first use and cached by Hugging Face. The index itself is local and ignored by Git. Search across the archived data is available when the index has been built; the current simulation records remain searchable separately.
 
 In the first PowerShell terminal, from the repository root, start the API on `127.0.0.1:8000`:
 
@@ -117,7 +157,7 @@ npm run build
 
 The detector evaluator reports per-category payment-signal recall, false-alert episodes per simulated day, and detection delay across held-out synthetic seeds and arrival assumptions. See [the RCA evaluation design](docs/experiments/002-rca-agent-evaluation.md) for the investigator rubric and control cases.
 
-Run a small live RCA evaluation with one investigation per scenario (payment cause plus three controls):
+Run the live RCA evaluation across three incident causes and three controls. Positive scenarios are investigated only when the statistical detector alerts during the planted incident windows; controls are investigated when they emit an alert, so the report measures false-cause claims and abstention conditional on an alert:
 
 ```powershell
 uv run python scripts/evaluate_rca.py --seed-count 1
@@ -127,7 +167,8 @@ This requires the OpenAI key and API credits. Each investigation can make multip
 
 ## Project layout
 
-- `src/agentic_ops/`: simulation, statistical detectors, evidence tools, API, and investigator.
+- `src/agentic_ops/detection/`: count-only detector contracts and statistical engine.
+- `src/agentic_ops/`: simulation, runtime orchestration, evidence tools, API, and investigator.
 - `web/`: React, TypeScript, and Vite interface.
 - `tests/`: Python unit and API tests.
 - `docs/specs/`: requirements, design, and task plan for the ticket-spike RCA slice.

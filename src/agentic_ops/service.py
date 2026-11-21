@@ -13,10 +13,15 @@ from typing import Any
 from dotenv import dotenv_values
 
 from agentic_ops.agent import Investigator, MockInvestigator, OpenAIInvestigator
-from agentic_ops.detectors import CategoryDetectorSuite
+from agentic_ops.detection import (
+    AlertEpisodeTracker,
+    CategoryDetectorSuite,
+    CountObservation,
+)
 from agentic_ops.domain import CATEGORIES, SimulationConfig
 from agentic_ops.evidence import EvidenceTools
 from agentic_ops.simulation import generate_run
+from agentic_ops.retrieval import load_knowledge_passages, load_runbook_pages
 from agentic_ops.store import EventStore
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -65,14 +70,26 @@ class OperationsRuntime:
         control = RunControl()
         with self._lock:
             self._controls[run_id] = control
+        truth_by_scenario = {
+            "payment_issue": "payment_authorization_failure",
+            "orders_queue_backlog": "order_worker_queue_backlog",
+            "delivery_carrier_degradation": "carrier_api_degradation",
+            "unrelated_issue": "unrelated_search_issue",
+            "resolved_issue": "resolved_payment_issue",
+            "healthy": "none",
+        }
         truth = {"scenario": config.scenario,
-                 "cause": "payment_authorization_failure" if config.scenario == "payment_issue" else
-                         ("unrelated_search_issue" if config.scenario == "unrelated_issue" else "none"),
+                 "cause": truth_by_scenario.get(config.scenario, "none"),
                  "issue_opens_at_window": min(config.calibration_windows, config.window_count // 3),
                  "severe_failure_starts_at_window": config.window_count - 4}
         self.store.add_truth(run_id, truth)
-        self.store.set_run_status(run_id, "running")
         start = "2026-01-01T00:00:00Z"
+        for page in load_runbook_pages():
+            self.store.add_event(run_id, start, "runbooks", "runbook_page", page)
+        for passage in load_knowledge_passages():
+            self.store.add_event(run_id, passage["available_at"], "knowledge_docs",
+                                 "document_passage", passage)
+        self.store.set_run_status(run_id, "running")
         self.store.add_event(run_id, start, "system", "run_started",
                              {"scenario": config.scenario, "seed": config.seed, "arrival_model": config.arrival_model,
                               "window_count": config.window_count})
@@ -83,7 +100,8 @@ class OperationsRuntime:
         return self.store.get_run(run_id) or {"run_id": run_id}
 
     def _run_simulation(self, run_id: str, config: SimulationConfig, control: RunControl) -> None:
-        suite = CategoryDetectorSuite(config.arrival_model, config.calibration_windows)
+        suite = CategoryDetectorSuite(config.arrival_model, config.calibration_windows, CATEGORIES)
+        episode_tracker = AlertEpisodeTracker()
         try:
             for window in generate_run(config):
                 with control.condition:
@@ -100,24 +118,36 @@ class OperationsRuntime:
                                          generated.event_type, generated.payload)
                 observation = self.store.add_event(
                     run_id, window.end, "detector", "window_observation",
-                    {"window_index": window.index, "window_start": window.start, "window_end": window.end,
+                    {"schema_version": 1, "window_index": window.index,
+                     "window_start": window.start, "window_end": window.end,
                      "ticket_count": window.ticket_count, "category_counts": window.category_counts},
                 )
-                category_results = suite.update(window.category_counts, window.index)
+                count_observation = CountObservation(
+                    window_index=window.index,
+                    window_start=window.start,
+                    window_end=window.end,
+                    category_counts=window.category_counts,
+                )
+                detection_result = suite.update(count_observation)
                 score_event = self.store.add_event(
                     run_id, window.end, "detector", "window_score",
-                    {"window_index": window.index, "observed": window.ticket_count,
+                    {"schema_version": 1, "window_index": window.index,
+                     "observed": window.ticket_count,
                      "category_counts": window.category_counts,
                      "scores_by_category": {
-                         category: {"observed": scores[0].observed if scores else window.category_counts[category],
-                                    "expected": scores[0].expected if scores else None,
-                                    "scores": [score.to_dict() for score in scores], "alerted": alerted}
-                         for category, (scores, alerted) in category_results.items()
+                         category: result.to_dict()
+                         for category, result in detection_result.categories.items()
                      },
                      "calibration": window.index < config.calibration_windows,
-                     "observation_evidence_id": observation["evidence_id"]},
+                     "observation_evidence_id": observation["evidence_id"],
+                     "detection_result": detection_result.to_dict()},
                 )
-                for category, (scores, alerted) in category_results.items():
+                for category, result in detection_result.categories.items():
+                    scores = result.scores
+                    alerted = result.alerted
+                    statistical_episode = episode_tracker.update(
+                        category, window.index, window.category_counts[category], alerted
+                    )
                     if alerted:
                         triggered = [score.detector for score in scores if score.anomalous]
                         by_detector = {score.detector: score for score in scores}
@@ -136,12 +166,14 @@ class OperationsRuntime:
                             },
                         }
                         self.store.add_event(run_id, window.end, "detector", "anomaly_alert",
-                                             {"metric": "support_ticket_arrivals", "category": category,
+                                             {"schema_version": 1,
+                                              "metric": "support_ticket_arrivals", "category": category,
                                               "window_index": window.index, "window_start": window.start,
                                               "window_end": window.end, "ticket_count": scores[0].observed,
                                               "expected": scores[0].expected,
                                               "signal": signal,
                                               "scores": [score.to_dict() for score in scores],
+                                              "statistical_episode": statistical_episode,
                                               "detectors_triggered": triggered,
                                               "observation_evidence_id": observation["evidence_id"],
                                               "window_score_evidence_id": score_event["evidence_id"]})
