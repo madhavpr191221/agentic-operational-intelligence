@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from agentic_ops.domain import CATEGORIES, CategoryFinding, EvidenceRef, Hypothesis, RCAReport, Recommendation
 from agentic_ops.evidence import EvidenceTools
+from agentic_ops.search_activity import summarize_search_trace
 
 ProgressCallback = Callable[[dict[str, Any]], Any] | None
 _agent_loop: asyncio.AbstractEventLoop | None = None
@@ -73,6 +74,8 @@ class Investigator:
 
 class MockInvestigator(Investigator):
     """Deterministic evidence-driven demo; it does not call an LLM."""
+
+    mode = "offline_demo"
 
     def investigate(self, run_id: str, question: str, evidence_tools: EvidenceTools,
                     alert_context: dict[str, Any] | None = None,
@@ -226,9 +229,11 @@ class MockInvestigator(Investigator):
 class OpenAIInvestigator(Investigator):
     """One adaptive tool-using agent with application-level safety ceilings."""
 
-    MAX_TURNS = 48
-    MAX_TOOL_CALLS = 80
-    MAX_SEARCHES_PER_SOURCE = 8
+    mode = "openai"
+
+    MAX_TURNS = 40
+    MAX_TOOL_CALLS = 32
+    MAX_CALLS_PER_TOOL = 8
 
     def __init__(self, model: str | None = None):
         self.model = model or os.getenv("OPENAI_MODEL", "gpt-6.1-sol")
@@ -249,7 +254,8 @@ class OpenAIInvestigator(Investigator):
         lock = threading.Lock()
         budget_reached = False
         calls_started = 0
-        source_searches: dict[str, int] = {}
+        tool_calls: dict[str, int] = {}
+        document_search_attempted: set[str] = set()
         cached_results: dict[str, str] = {}
         cached_raw_results: dict[str, dict[str, Any]] = {}
         aliases_by_evidence: dict[str, str] = {}
@@ -281,13 +287,13 @@ class OpenAIInvestigator(Investigator):
                         on_progress({"type": "tool_reused", "stage": "gathering_evidence", "tool": name,
                                      "message": "Reused the result of an identical earlier search."})
                     return cached
-                if source_searches.get(name, 0) >= self.MAX_SEARCHES_PER_SOURCE:
-                    blocked = {"search_limit": True,
-                               "message": "This evidence source has reached its focused-search limit. Use evidence already gathered or investigate another source."}
+                if tool_calls.get(name, 0) >= self.MAX_CALLS_PER_TOOL:
+                    blocked = {"call_limit": True,
+                               "message": "This tool has reached its call limit. Use evidence already gathered or investigate another uncertainty."}
                     trace.append({"tool": name, "arguments": arguments, "result": blocked})
                     if on_progress:
-                        on_progress({"type": "source_limit", "stage": "gathering_evidence", "tool": name,
-                                     "message": "Focused-search limit reached for this source."})
+                        on_progress({"type": "tool_limit", "stage": "gathering_evidence", "tool": name,
+                                     "message": "Call limit reached for this tool."})
                     return json.dumps(blocked)
                 if calls_started >= self.MAX_TOOL_CALLS:
                     denied = {"error": "Investigation safety ceiling reached; no more evidence searches were run."}
@@ -299,7 +305,7 @@ class OpenAIInvestigator(Investigator):
                                          "tool": name, "message": "Search ceiling reached; preparing a partial report."})
                     return json.dumps(denied)
                 calls_started += 1
-                source_searches[name] = source_searches.get(name, 0) + 1
+                tool_calls[name] = tool_calls.get(name, 0) + 1
                 if on_progress:
                     on_progress({"type": "tool_started", "stage": "gathering_evidence", "tool": name,
                                  "message": f"Searching {name.replace('_', ' ')}."})
@@ -319,142 +325,140 @@ class OpenAIInvestigator(Investigator):
                              "message": _tool_summary(result)})
             return cached_results[cache_key]
 
-        @function_tool(name_override="search_tickets", description_override=
-                       "Search tickets in an operator-selected category around its full alert episode, including up to six hours before it. Use one or two symptom keywords.")
-        def search_tickets(category: str, query: str, limit: int = 5) -> str:
-            """Search category ticket text in the selected episode time range. Limit is clamped to 1 through 8."""
-            limit = max(1, min(8, limit))
-            episode = selected_episode(category)
-            return run_tool("search_tickets", {"category": category, "query": query, "limit": limit},
-                            lambda: evidence_tools.search_tickets(run_id, query, limit, category,
-                                                                  episode["context_start_at"], episode["analysis_end_at"]))
-
-        @function_tool(name_override="search_issues", description_override=
-                       "Search fictional issue records using one or two service or symptom keywords. Do not put dates in the query; records include timestamps.")
-        def search_issues(category: str, query: str, limit: int = 5) -> str:
-            """Search issue payload text with one or two keywords; timestamps are returned separately. Limit is clamped to 1 through 8."""
-            selected_episode(category)
-            limit = max(1, min(8, limit))
-            return run_tool("search_issues", {"category": category, "query": query, "limit": limit},
-                            lambda: evidence_tools.search_issues(
-                                run_id, query, limit, selected_episode(category)["analysis_end_at"], category))
-
-        @function_tool(name_override="search_product_logs", description_override=
-                       "Search synthetic product logs using one or two service or error keywords. Do not put dates in the query; records include timestamps.")
-        def search_product_logs(category: str, query: str, limit: int = 5) -> str:
-            """Search log payload text with one or two keywords; timestamps are returned separately. Limit is clamped to 1 through 8."""
-            episode = selected_episode(category)
-            limit = max(1, min(8, limit))
-            return run_tool("search_product_logs", {"category": category, "query": query, "limit": limit},
-                            lambda: evidence_tools.search_product_logs(run_id, query, limit,
-                                                                      episode["context_start_at"], episode["analysis_end_at"]))
-
-        @function_tool(name_override="list_changes", description_override=
-                       "List synthetic changes for a service when change history could explain the signal.")
-        def list_changes(category: str, service: str = "", limit: int = 5) -> str:
-            """List fictional service changes. Limit is clamped to 1 through 8."""
-            episode = selected_episode(category)
-            limit = max(1, min(8, limit))
-            return run_tool("list_changes", {"category": category, "service": service, "limit": limit},
-                            lambda: evidence_tools.list_changes(run_id, service, limit,
-                                                                episode["change_start_at"], episode["analysis_end_at"]))
-
-        @function_tool(name_override="search_related_evidence", description_override=
-                       "Use hybrid keyword and semantic search across tickets, issue descriptions, and change summaries. Results are restricted to the selected category's time context and alert cutoff.")
-        def search_related_evidence(category: str, query: str, limit: int = 8) -> str:
-            """Search customer and operational text for a symptom or competing explanation."""
-            episode = selected_episode(category)
-            limit = max(1, min(10, limit))
-            return run_tool("search_related_evidence", {"category": category, "query": query, "limit": limit},
-                            lambda: evidence_tools.search_related_evidence(
-                                run_id, query, category, episode["context_start_at"],
-                                episode["analysis_end_at"], limit))
-
-        @function_tool(name_override="search_operational_docs", description_override=
-                       "Search fictional service guides, historical postmortems, deployment guidance, and category runbooks using keyword and semantic similarity. Results show document source and section or PDF page, and are limited to material available by the alert cutoff.")
-        def search_operational_docs(category: str, query: str, limit: int = 8) -> str:
-            """Find relevant operational references and runbook guidance for the selected category."""
-            if category not in selected_categories:
-                raise ValueError("Document searches are limited to selected categories.")
-            episode = selected_episode(category)
-            return run_tool("search_operational_docs", {"category": category, "query": query,
-                            "limit": max(1, min(10, limit)), "as_of": episode["analysis_end_at"]},
-                            lambda: evidence_tools.search_operational_docs(
-                                run_id, query, category, episode["analysis_end_at"],
-                                max(1, min(10, limit))))
-
         def validate_selection(category: str) -> dict[str, Any]:
             if category not in selected_categories:
                 raise ValueError("Analysis is limited to operator-selected categories.")
             return selected_episode(category)
 
-        @function_tool(name_override="compare_categories", description_override=
-                       "Compare observed and expected category ticket totals across the complete selected alert episode.")
-        def compare_categories(category: str) -> str:
+        @function_tool(name_override="search_evidence", description_override=(
+            "Search customer tickets, issue records, change records, and operational documents. "
+            "Choose relevant source groups; the first search for each category also checks operational documents. "
+            "Results are restricted to the selected category "
+            "and investigation time bounds; document search uses hybrid keyword and semantic retrieval."))
+        def search_evidence(category: str, query: str,
+                            sources: list[Literal["customer_tickets", "issues", "changes", "operational_docs"]],
+                            limit: int = 5) -> str:
+            """Search selected evidence sources with one short symptom or service query."""
+            episode = validate_selection(category)
+            allowed_sources = {"customer_tickets", "issues", "changes", "operational_docs"}
+            if not sources or any(source not in allowed_sources for source in sources):
+                raise ValueError("Choose one or more supported evidence source groups.")
+            selected_sources = list(dict.fromkeys(sources))
+            if category not in document_search_attempted:
+                selected_sources = list(dict.fromkeys([*selected_sources, "operational_docs"]))
+                document_search_attempted.add(category)
+            limit = max(1, min(5, limit))
+
+            def search_selected_sources() -> dict[str, Any]:
+                results: dict[str, Any] = {}
+                source_operations = {
+                    "customer_tickets": lambda: evidence_tools.search_tickets(
+                        run_id, query, limit, category,
+                        episode["context_start_at"], episode["analysis_end_at"]),
+                    "issues": lambda: evidence_tools.search_issues(
+                        run_id, query, limit, episode["analysis_end_at"], category),
+                    "changes": lambda: evidence_tools.list_changes(
+                        run_id, evidence_tools.service_for_category(category), limit,
+                        episode["change_start_at"], episode["analysis_end_at"]),
+                    "operational_docs": lambda: evidence_tools.search_operational_docs(
+                        run_id, query, category, episode["analysis_end_at"], limit),
+                }
+                unavailable: dict[str, str] = {}
+                for source in selected_sources:
+                    try:
+                        results[source] = source_operations[source]()
+                    except Exception as exc:
+                        unavailable[source] = str(exc)
+                total = sum(int(result.get("count", 0)) for result in results.values())
+                return {"category": category, "query": query,
+                        "available_through": episode["analysis_end_at"], "count": total,
+                        "archive_index_ready": evidence_tools.corpus.ready,
+                        "results": results, "unavailable_sources": unavailable}
+
+            return run_tool("search_evidence", {"category": category, "query": query,
+                            "sources": selected_sources, "limit": limit}, search_selected_sources)
+
+        @function_tool(name_override="query_service_health", description_override=(
+            "Inspect structured service error counts and rates around the selected focus group, "
+            "plus matching service-log records. Numeric telemetry is filtered structurally, not embedded."))
+        def query_service_health(category: str) -> str:
+            """Return per-window service health and matching logs for the selected category."""
+            episode = validate_selection(category)
+            focus = episode["focus"]
+            focus_start = int(focus["start_window_index"])
+            focus_end = int(focus["end_window_index"])
+            focus_start_at = str(focus["start_at"])
+            focus_end_at = str(focus["end_at"])
+            service = evidence_tools.service_for_category(category)
+
+            def query_health() -> dict[str, Any]:
+                return {
+                    "focus_window_analysis": evidence_tools.analyze_focus_window(
+                        run_id, category, int(episode["focus_window_index"]), focus_start, focus_end),
+                    "matching_service_logs": evidence_tools.search_product_logs(
+                        run_id, service, 8, episode["context_start_at"], episode["analysis_end_at"]),
+                    "service": service, "focus_interval": {"start_at": focus_start_at,
+                                                          "end_at": focus_end_at},
+                }
+
+            return run_tool("query_service_health", {"category": category,
+                            "focus_start_at": focus_start_at, "focus_end_at": focus_end_at}, query_health)
+
+        @function_tool(name_override="analyze_customer_tickets", description_override=(
+            "Compare customer ticket themes and rank reason/channel contributors across the selected "
+            "episode against an equal-length prior baseline."))
+        def analyze_customer_tickets(category: str) -> str:
+            """Summarize ticket reasons, channels, and example evidence for the selected episode."""
             episode = validate_selection(category)
             start_index = int(episode["start_window_index"])
             end_index = int(episode["end_window_index"])
-            return run_tool("compare_categories", {"category": category, "start_window_index": start_index,
-                             "end_window_index": end_index},
-                            lambda: evidence_tools.compare_categories(run_id, start_index, end_index))
 
-        @function_tool(name_override="rank_ticket_contributors", description_override=
-                       "Rank ticket reasons and channels across the selected episode versus an equal-length preceding interval.")
-        def rank_ticket_contributors(category: str) -> str:
+            def analyze_tickets() -> dict[str, Any]:
+                return {
+                    "theme_comparison": evidence_tools.compare_ticket_themes(
+                        run_id, category, start_index, end_index),
+                    "top_contributors": evidence_tools.rank_ticket_contributors(
+                        run_id, category, start_index, end_index),
+                }
+
+            return run_tool("analyze_customer_tickets", {"category": category,
+                            "start_window_index": start_index, "end_window_index": end_index}, analyze_tickets)
+
+        @function_tool(name_override="compare_incident_context", description_override=(
+            "Compare category counts across the episode and compare the selected category with its "
+            "equal-duration prior period."))
+        def compare_incident_context(category: str) -> str:
             episode = validate_selection(category)
             start_index = int(episode["start_window_index"])
             end_index = int(episode["end_window_index"])
-            return run_tool("rank_ticket_contributors", {"category": category, "start_window_index": start_index,
-                             "end_window_index": end_index},
-                            lambda: evidence_tools.rank_ticket_contributors(run_id, category, start_index, end_index))
 
-        @function_tool(name_override="build_incident_timeline", description_override=
-                       "Build a timeline from six hours before the episode start through its final 30-minute alert window.")
+            def compare_context() -> dict[str, Any]:
+                return {
+                    "category_comparison": evidence_tools.compare_categories(
+                        run_id, start_index, end_index),
+                    "before_after": evidence_tools.compare_before_after(
+                        run_id, category, start_index, end_index),
+                }
+
+            return run_tool("compare_incident_context", {"category": category,
+                            "start_window_index": start_index, "end_window_index": end_index}, compare_context)
+
+        @function_tool(name_override="build_incident_timeline", description_override=(
+            "Build a chronological timeline of relevant tickets, service logs, issues, and changes "
+            "from six hours before the episode through its final alert window."))
         def build_incident_timeline(category: str) -> str:
             episode = validate_selection(category)
             start_index = int(episode["start_window_index"])
             end_index = int(episode["end_window_index"])
-            return run_tool("build_incident_timeline", {"category": category, "start_window_index": start_index,
-                             "end_window_index": end_index},
-                            lambda: evidence_tools.build_incident_timeline(run_id, category, start_index, end_index))
-
-        @function_tool(name_override="compare_before_after", description_override=
-                       "Compare ticket and service-error rates across the complete episode with the immediately preceding equal-duration interval.")
-        def compare_before_after(category: str) -> str:
-            episode = validate_selection(category)
-            start_index = int(episode["start_window_index"])
-            end_index = int(episode["end_window_index"])
-            return run_tool("compare_before_after", {"category": category, "start_window_index": start_index,
-                             "end_window_index": end_index},
-                            lambda: evidence_tools.compare_before_after(run_id, category, start_index, end_index))
-
-        @function_tool(name_override="analyze_focus_window", description_override=
-                       "Inspect the chosen 30-minute alert window with up to two preceding windows and one following window, if available.")
-        def analyze_focus_window(category: str) -> str:
-            episode = validate_selection(category)
-            focus_index = int(episode["focus_window_index"])
-            focus = episode["focus"]
-            return run_tool("analyze_focus_window", {"category": category, "focus_window_index": focus_index,
-                             "start_window_index": focus["start_window_index"],
-                             "end_window_index": focus["end_window_index"]},
-                            lambda: evidence_tools.analyze_focus_window(
-                                run_id, category, focus_index,
-                                int(focus["start_window_index"]), int(focus["end_window_index"])))
-
-        @function_tool(name_override="compare_ticket_themes", description_override=
-                       "Compare ticket reason themes and their shares in the alert episode with an equal-length prior baseline, including example customer evidence.")
-        def compare_ticket_themes(category: str) -> str:
-            episode = validate_selection(category)
-            start_index = int(episode["start_window_index"])
-            end_index = int(episode["end_window_index"])
-            return run_tool("compare_ticket_themes", {"category": category,
-                             "start_window_index": start_index, "end_window_index": end_index},
-                            lambda: evidence_tools.compare_ticket_themes(
+            return run_tool("build_incident_timeline", {"category": category,
+                            "start_window_index": start_index, "end_window_index": end_index},
+                            lambda: evidence_tools.build_incident_timeline(
                                 run_id, category, start_index, end_index))
 
-        @function_tool(name_override="suggest_runbook_actions", description_override=
-                       "Retrieve a fictional, non-executing runbook next step grounded in evidence IDs returned by this investigation. Never execute a change.")
-        def suggest_runbook_actions(category: str, evidence_ids: list[str]) -> str:
+        @function_tool(name_override="get_runbook_guidance", description_override=(
+            "Return an advisory, non-executing next step grounded only in evidence IDs already "
+            "returned by this investigation."))
+        def get_runbook_guidance(category: str, evidence_ids: list[str]) -> str:
             if category not in selected_categories:
                 raise ValueError("Runbook suggestions are limited to selected categories.")
             previously_returned = [value for value in evidence_ids
@@ -464,10 +468,10 @@ class OpenAIInvestigator(Investigator):
                 evidence_by_id[value].source == "detector",
             ))
             previously_returned = previously_returned[:20]
-            return run_tool("suggest_runbook_actions", {"category": category,
+            return run_tool("get_runbook_guidance", {"category": category,
                             "evidence_ids": previously_returned},
-                            lambda: evidence_tools.suggest_runbook_actions(run_id, category, previously_returned))
-
+                            lambda: evidence_tools.suggest_runbook_actions(
+                                run_id, category, previously_returned))
         agent = Agent(
             name="Operations RCA Investigator",
             model=self.model,
@@ -482,10 +486,20 @@ class OpenAIInvestigator(Investigator):
                 "Do not diagnose each window independently. If fewer windows exist at a run boundary, reason from the available group and state its exact time range. "
                 "Evidence outside the selected focus group, including older logs and open issues, may support or qualify the finding, but explicitly treat it as additional context rather than evidence inside the focus group. "
                 "Search evidence within the selected episode and its preceding context; active issues may predate that context. "
-                "Start with focused searches across tickets, issues, logs, changes, and operational documents. Operational documents include service guides, historical postmortems, deployment guidance, and runbooks; use them to suggest checks, not as proof that a historical cause recurred. The text searches use keyword and semantic similarity; service logs use structured field matching. All dated material must be available by the selected alert cutoff. After seeing results, make a targeted "
-                "follow-up only to resolve a named uncertainty. Cover each selected category with focused searches; "
-                "each source allows at most one initial search per selected category and identical queries reuse cached results. Before finalizing, call compare_categories, compare_ticket_themes, rank_ticket_contributors, build_incident_timeline, compare_before_after, and analyze_focus_window for every selected category, and search operational documents before requesting suggest_runbook_actions with only evidence IDs returned earlier. These deterministic tools analyze the records; they do not recompute detector statistics. Recommendations are advisory and must never be executed. Stop once these checks are complete and any named uncertainty is resolved. The evidence-call ceiling is a final safety guard, not a target. "
-                "sufficient to support or reject a cause. Search queries match record payload text: use one or two "
+                "For each selected category, search relevant text sources with search_evidence and include at least one focused "
+                "operational_docs search using a customer symptom or service name. This ensures relevant guides and runbooks "
+                "are checked rather than assumed. State when the archive index is unavailable or no passages match. Inspect structured "
+                "service metrics with query_service_health; compare ticket themes and contributors with "
+                "analyze_customer_tickets; compare the episode with other categories and its prior period using "
+                "compare_incident_context; and build a timeline with build_incident_timeline. Search operational "
+                "documents before calling get_runbook_guidance, and pass only evidence IDs returned earlier. The "
+                "selected signal already contains chronological T-2, T-1, T, and available T+1 window details; use "
+                "exact UTC intervals and distinguish focus-group evidence from broader episode context. All dated "
+                "material must be available by the selected investigation cutoff. Make a targeted follow-up only to "
+                "resolve a named uncertainty. These deterministic tools do not recompute detector statistics. "
+                "Recommendations are advisory and must never be executed. Stop when required checks are complete "
+                "and a named uncertainty is resolved. The tool-call ceiling is a safety guard, not a target. "
+                "Search queries match record payload text: use one or two "
                 "keywords (for example, 'payment' or 'checkout-payments') and never put timestamps in the query; "
                 "timestamps are returned as record metadata. Return brief candidate explanations and uncertainties; "
                 "the final report step will verify each claim against evidence and constrain its citations. "
@@ -493,11 +507,8 @@ class OpenAIInvestigator(Investigator):
                 "Do not claim causality is proven or infer hidden scenario truth. "
                 "Synthetic scenario truth is hidden and must not be inferred from scenario names."
             ),
-        tools=[search_tickets, search_issues, search_product_logs, list_changes,
-               search_related_evidence, search_operational_docs,
-               compare_categories, rank_ticket_contributors, build_incident_timeline,
-               compare_before_after, analyze_focus_window, suggest_runbook_actions,
-               compare_ticket_themes],
+        tools=[search_evidence, query_service_health, analyze_customer_tickets,
+               compare_incident_context, build_incident_timeline, get_runbook_guidance],
             output_type=InvestigationNotes,
         )
         if on_progress:
@@ -531,6 +542,7 @@ class OpenAIInvestigator(Investigator):
                                                 budget_reached, on_progress)
             report.episode_summaries = [signal["episode_summary"] for signal in signals
                                         if isinstance(signal.get("episode_summary"), dict)]
+            report.search_activity = summarize_search_trace(trace)
             return report
         except MaxTurnsExceeded:
             if on_progress:
@@ -540,7 +552,7 @@ class OpenAIInvestigator(Investigator):
                         "The investigator reached its turn ceiling before resolving this category.",
                         ["What evidence would distinguish the remaining explanations?"])
                         for category in selected_categories]
-            return RCAReport(status="incomplete",
+            report = RCAReport(status="incomplete",
                              summary="The investigation reached its agent-turn safety ceiling before it could produce a complete report.",
                              hypotheses=[], evidence=list(evidence_by_id.values()),
                              unresolved_questions=["What explanation best fits the evidence collected so far?"],
@@ -548,6 +560,8 @@ class OpenAIInvestigator(Investigator):
                               recommendations=_recommendations_from_trace(trace, selected_categories, set(evidence_by_id)),
                               episode_summaries=[signal["episode_summary"] for signal in signals
                                                  if isinstance(signal.get("episode_summary"), dict)])
+            report.search_activity = summarize_search_trace(trace)
+            return report
 
     async def _compose_report(self, question: str, signals: list[dict[str, Any]],
                               selected_categories: list[str], notes: InvestigationNotes,
@@ -736,7 +750,7 @@ def _recommendations_from_trace(trace: list[dict[str, Any]], categories: list[st
     recommendations: list[Recommendation] = []
     seen: set[tuple[str, str | None]] = set()
     for entry in trace:
-        if entry.get("tool") != "suggest_runbook_actions":
+        if entry.get("tool") not in {"suggest_runbook_actions", "get_runbook_guidance"}:
             continue
         result = entry.get("result", {})
         if not isinstance(result, dict) or result.get("category") not in categories:
@@ -783,8 +797,11 @@ def _collect_evidence_records(value: Any, target: dict[str, dict[str, Any]]) -> 
 
 def _tool_summary(result: Any) -> str:
     if isinstance(result, dict):
+        if isinstance(result.get("count"), int):
+            return f"Found {result['count']} matching records."
         records = next((value for value in result.values() if isinstance(value, list)), [])
-        return f"Found {len(records)} matching records." if records else str(result.get("error", "Search completed; no matching records."))
+        message = result.get("error") or result.get("message")
+        return f"Found {len(records)} matching records." if records else str(message or "Search completed; no matching records.")
     return "Search completed."
 
 
@@ -829,6 +846,9 @@ def _collect_evidence_refs(value: Any, target: dict[str, EvidenceRef]) -> None:
             source = value.get("source", "synthetic evidence")
             timestamp = value.get("observed_at", "unknown time")
             payload = value.get("payload", {})
+            available_at = value.get("available_at")
+            if available_at is None and isinstance(payload, dict):
+                available_at = payload.get("available_at")
             if source == "support_tickets" and isinstance(payload, dict):
                 summary = f"{payload.get('title', 'Customer message')}: {payload.get('body', '')}".strip()
             elif source in {"runbooks", "knowledge_docs"} and isinstance(payload, dict):
@@ -839,11 +859,15 @@ def _collect_evidence_refs(value: Any, target: dict[str, EvidenceRef]) -> None:
                 summary = value.get("summary") or value.get("event_type") or "Tool result"
             window_index = payload.get("window_index") if isinstance(payload, dict) else None
             target[evidence_id] = EvidenceRef(
-                evidence_id, source, timestamp, str(summary),
-                int(window_index) if window_index is not None else None,
-                int(payload["page_number"]) if isinstance(payload, dict) and payload.get("page_number") else None,
-                str(payload["source_path"]) if isinstance(payload, dict) and payload.get("source_path") else None,
-                str(payload["section_title"]) if isinstance(payload, dict) and payload.get("section_title") else None,
+                evidence_id=evidence_id, source=source, observed_at=timestamp, summary=str(summary),
+                available_at=str(available_at) if available_at else None,
+                window_index=int(window_index) if window_index is not None else None,
+                page_number=(int(payload["page_number"])
+                             if isinstance(payload, dict) and payload.get("page_number") else None),
+                source_path=(str(payload["source_path"])
+                             if isinstance(payload, dict) and payload.get("source_path") else None),
+                section_title=(str(payload["section_title"])
+                               if isinstance(payload, dict) and payload.get("section_title") else None),
             )
         for child in value.values():
             _collect_evidence_refs(child, target)

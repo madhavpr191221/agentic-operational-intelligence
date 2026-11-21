@@ -5,6 +5,7 @@ from pathlib import Path
 
 from agentic_ops.agent import MockInvestigator
 from agentic_ops.domain import RCAReport, SimulationConfig
+from agentic_ops.detector_host import list_incidents
 from agentic_ops.service import OperationsRuntime
 from agentic_ops.store import EventStore
 
@@ -15,6 +16,7 @@ class RuntimeTests(unittest.TestCase):
         self.runtime = OperationsRuntime(EventStore(Path(self.temp.name) / "runtime.sqlite3"), MockInvestigator())
 
     def tearDown(self):
+        self.runtime.incident_worker.stop()
         self.temp.cleanup()
 
     def test_run_emits_scores_alerts_and_keeps_truth_separate(self):
@@ -29,6 +31,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(any(event["event_type"] == "window_observation" for event in events))
         self.assertTrue(any(event["event_type"] == "window_score" for event in events))
         self.assertTrue(any(event["event_type"] == "anomaly_alert" for event in events))
+        incidents = list_incidents(self.runtime.store, run["run_id"])
+        self.assertTrue(any(incident["category"] == "payments" for incident in incidents))
         observation = next(event for event in events if event["event_type"] == "window_observation")
         score_event = next(event for event in events if event["event_type"] == "window_score")
         self.assertEqual(observation["payload"]["schema_version"], 1)
@@ -64,6 +68,7 @@ class RuntimeTests(unittest.TestCase):
         ticket_evidence = [item for item in report["evidence"] if item["source"] == "support_tickets"]
         self.assertTrue(any(item["summary"] != "ticket_created" for item in ticket_evidence))
         self.assertTrue(report["recommendations"])
+        self.assertTrue(report["search_activity"])
         for recommendation in report["recommendations"]:
             self.assertTrue(set(recommendation["supporting_evidence"]).issubset(evidence_ids))
 

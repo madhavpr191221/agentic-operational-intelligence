@@ -171,12 +171,19 @@ class EventStore:
 
     def search_events(self, run_id: str, sources: tuple[str, ...], query: str = "", limit: int = 30,
                       event_types: tuple[str, ...] = (), start_at: str | None = None,
-                      end_at: str | None = None) -> list[dict[str, Any]]:
+                      end_at: str | None = None, *, max_sequence: int | None = None,
+                      as_of: str | None = None) -> list[dict[str, Any]]:
         if not sources:
             return []
         source_slots = ",".join("?" for _ in sources)
         sql = f"SELECT * FROM events WHERE run_id=? AND source IN ({source_slots})"
         params: list[Any] = [run_id, *sources]
+        if max_sequence is not None:
+            sql += " AND sequence<=?"
+            params.append(max_sequence)
+        if as_of is not None:
+            sql += " AND simulated_at<=?"
+            params.append(as_of)
         if event_types:
             type_slots = ",".join("?" for _ in event_types)
             sql += f" AND event_type IN ({type_slots})"
@@ -200,7 +207,8 @@ class EventStore:
                                                             for term in terms)]
         return list(reversed(records[-limit:]))
 
-    def get_events_by_evidence_ids(self, run_id: str, evidence_ids: list[str]) -> list[dict[str, Any]]:
+    def get_events_by_evidence_ids(self, run_id: str, evidence_ids: list[str], *,
+                                   max_sequence: int | None = None, as_of: str | None = None) -> list[dict[str, Any]]:
         """Resolve a small caller-supplied citation set within one run only."""
         ids = list(dict.fromkeys(evidence_ids))[:20]
         if not ids:
@@ -211,7 +219,9 @@ class EventStore:
                 f"SELECT * FROM events WHERE run_id=? AND evidence_id IN ({placeholders}) ORDER BY sequence",
                 (run_id, *ids),
             ).fetchall()
-        return [self._event(row) for row in rows]
+        return [self._event(row) for row in rows
+                if (max_sequence is None or row["sequence"] <= max_sequence)
+                and (as_of is None or row["simulated_at"] <= as_of)]
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self._connection() as connection:

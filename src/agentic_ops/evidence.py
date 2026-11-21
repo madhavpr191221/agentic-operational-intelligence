@@ -23,6 +23,14 @@ class EvidenceTools:
         self.retriever = retriever or HybridRetriever(store, models=models)
         self.corpus = corpus or CorpusSearch(models=models)
 
+    @classmethod
+    def service_for_category(cls, category: str) -> str:
+        """Return the service monitored for a support category."""
+        try:
+            return cls._SERVICE_BY_CATEGORY[category]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported support category: {category}") from exc
+
     @staticmethod
     def _dedupe(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         unique: list[dict[str, Any]] = []

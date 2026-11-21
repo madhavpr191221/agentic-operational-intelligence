@@ -229,6 +229,31 @@ class CategoryDetectorSuite:
             categories=categories,
         )
 
+    def checkpoint(self) -> dict:
+        """Return the count-only state required to resume scoring."""
+        return {
+            "version": 1,
+            "categories": list(self.categories),
+            "suites": {
+                category: {"baseline": list(suite.baseline), "expected": suite.expected,
+                           "nb_shape": suite.nb_shape, "cusum": suite.cusum,
+                           "baseline_frozen": suite.baseline_frozen}
+                for category, suite in self.suites.items()
+            },
+        }
+
+    def restore(self, state: dict) -> None:
+        """Restore a checkpoint produced for the same category configuration."""
+        if state.get("version") != 1 or state.get("categories") != list(self.categories):
+            raise ValueError("Incompatible detector checkpoint")
+        for category, suite in self.suites.items():
+            saved = state["suites"][category]
+            suite.baseline = list(saved["baseline"])
+            suite.expected = float(saved["expected"])
+            suite.nb_shape = float(saved["nb_shape"])
+            suite.cusum = float(saved["cusum"])
+            suite.baseline_frozen = bool(saved["baseline_frozen"])
+
 
 class AlertEpisodeTracker:
     """Group consecutive threshold crossings for each category.
@@ -239,6 +264,12 @@ class AlertEpisodeTracker:
 
     def __init__(self) -> None:
         self._active: dict[str, dict[str, int | str]] = {}
+
+    def checkpoint(self) -> dict:
+        return {category: dict(episode) for category, episode in self._active.items()}
+
+    def restore(self, state: dict) -> None:
+        self._active = {category: dict(episode) for category, episode in state.items()}
 
     def update(self, category: str, index: int, observed: int, alerted: bool) -> dict[str, int | str] | None:
         if not alerted:

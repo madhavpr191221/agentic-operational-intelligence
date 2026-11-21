@@ -14,14 +14,16 @@ from dotenv import dotenv_values
 
 from agentic_ops.agent import Investigator, MockInvestigator, OpenAIInvestigator
 from agentic_ops.detection import (
-    AlertEpisodeTracker,
     CategoryDetectorSuite,
     CountObservation,
 )
 from agentic_ops.domain import CATEGORIES, SimulationConfig
+from agentic_ops.detector_host import DetectorHost
+from agentic_ops.incident_worker import IncidentWorker
 from agentic_ops.evidence import EvidenceTools
 from agentic_ops.simulation import generate_run
 from agentic_ops.retrieval import load_knowledge_passages, load_runbook_pages
+from agentic_ops.search_activity import summarize_search_trace
 from agentic_ops.store import EventStore
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -50,9 +52,19 @@ class OperationsRuntime:
     def __init__(self, store: EventStore | None = None, investigator: Investigator | None = None):
         self.store = store or EventStore()
         self.evidence = EvidenceTools(self.store)
+        # Initialize the additive incident/outbox schema even before a replay exists.
+        DetectorHost(self.store, "schema-bootstrap", CategoryDetectorSuite("poisson", 48, CATEGORIES))
         self._provided_investigator = investigator
         self._controls: dict[str, RunControl] = {}
         self._lock = threading.Lock()
+        self.incident_worker = IncidentWorker(self.store, self._investigator, self.evidence)
+        self.incident_worker.start()
+
+    @property
+    def investigator_mode(self) -> str:
+        if self._provided_investigator is not None:
+            return getattr(self._provided_investigator, "mode", "custom")
+        return "offline_demo" if os.getenv("AGENT_MODE", "openai").casefold() == "mock" else "openai"
 
     def _investigator(self) -> Investigator:
         if self._provided_investigator is not None:
@@ -65,8 +77,12 @@ class OperationsRuntime:
             raise RuntimeError("Set OPENAI_API_KEY or choose AGENT_MODE=mock for an offline demo.")
         return OpenAIInvestigator()
 
-    def start_run(self, config: SimulationConfig) -> dict[str, Any]:
-        run_id = self.store.create_run(config.scenario, config.seed, config.arrival_model, asdict(config))
+    def start_run(self, config: SimulationConfig, investigation_mode: str = "automatic") -> dict[str, Any]:
+        if investigation_mode not in {"automatic", "manual"}:
+            raise ValueError("Investigation mode must be automatic or manual")
+        run_config = asdict(config)
+        run_config["investigation_mode"] = investigation_mode
+        run_id = self.store.create_run(config.scenario, config.seed, config.arrival_model, run_config)
         control = RunControl()
         with self._lock:
             self._controls[run_id] = control
@@ -100,9 +116,13 @@ class OperationsRuntime:
         return self.store.get_run(run_id) or {"run_id": run_id}
 
     def _run_simulation(self, run_id: str, config: SimulationConfig, control: RunControl) -> None:
-        suite = CategoryDetectorSuite(config.arrival_model, config.calibration_windows, CATEGORIES)
-        episode_tracker = AlertEpisodeTracker()
+        detector_host = DetectorHost(
+            self.store, run_id,
+            CategoryDetectorSuite(config.arrival_model, config.calibration_windows, CATEGORIES),
+        )
         try:
+            automatic = self._run_investigation_mode(run_id) == "automatic"
+            detector_host.deliver_pending(automatic=automatic)
             for window in generate_run(config):
                 with control.condition:
                     while control.paused and control.step_budget == 0 and not control.stopped:
@@ -128,60 +148,65 @@ class OperationsRuntime:
                     window_end=window.end,
                     category_counts=window.category_counts,
                 )
-                detection_result = suite.update(count_observation)
+                detection = detector_host.process(count_observation)
                 score_event = self.store.add_event(
                     run_id, window.end, "detector", "window_score",
                     {"schema_version": 1, "window_index": window.index,
                      "observed": window.ticket_count,
                      "category_counts": window.category_counts,
-                     "scores_by_category": {
-                         category: result.to_dict()
-                         for category, result in detection_result.categories.items()
-                     },
+                     "scores_by_category": detection["categories"],
                      "calibration": window.index < config.calibration_windows,
                      "observation_evidence_id": observation["evidence_id"],
-                     "detection_result": detection_result.to_dict()},
+                     "detection_result": detection},
                 )
-                for category, result in detection_result.categories.items():
-                    scores = result.scores
-                    alerted = result.alerted
-                    statistical_episode = episode_tracker.update(
-                        category, window.index, window.category_counts[category], alerted
-                    )
-                    if alerted:
-                        triggered = [score.detector for score in scores if score.anomalous]
-                        by_detector = {score.detector: score for score in scores}
-                        likelihood_name = ("negative_binomial_llr" if config.arrival_model == "negative_binomial"
-                                           else "poisson_llr")
-                        signal = {
-                            "metric": "support_ticket_arrivals", "category": category,
-                            "window_index": window.index, "window_start": window.start,
-                            "window_end": window.end, "window_minutes": 30,
-                            "observed": scores[0].observed, "expected": scores[0].expected,
-                            "arrival_model": config.arrival_model,
-                            "scores": {
-                                "z_score": by_detector["standardized_residual"].score,
-                                "cusum": by_detector["cusum"].score,
-                                "log_likelihood_ratio": by_detector[likelihood_name].score,
-                            },
-                        }
-                        self.store.add_event(run_id, window.end, "detector", "anomaly_alert",
-                                             {"schema_version": 1,
-                                              "metric": "support_ticket_arrivals", "category": category,
-                                              "window_index": window.index, "window_start": window.start,
-                                              "window_end": window.end, "ticket_count": scores[0].observed,
-                                              "expected": scores[0].expected,
-                                              "signal": signal,
-                                              "scores": [score.to_dict() for score in scores],
-                                              "statistical_episode": statistical_episode,
-                                              "detectors_triggered": triggered,
-                                              "observation_evidence_id": observation["evidence_id"],
-                                              "window_score_evidence_id": score_event["evidence_id"]})
+                transition_by_category = {
+                    event["category"]: event["episode"]
+                    for event in detector_host.pending_events()
+                    if event["window"]["window_index"] == window.index
+                    and event["event_type"] in {"episode_opened", "episode_updated"}
+                }
+                for category, result in detection["categories"].items():
+                    if not result["alerted"]:
+                        continue
+                    scores = result["scores"]
+                    triggered = [score["detector"] for score in scores if score["anomalous"]]
+                    by_detector = {score["detector"]: score for score in scores}
+                    likelihood_name = ("negative_binomial_llr" if config.arrival_model == "negative_binomial"
+                                       else "poisson_llr")
+                    signal = {
+                        "metric": "support_ticket_arrivals", "category": category,
+                        "window_index": window.index, "window_start": window.start,
+                        "window_end": window.end, "window_minutes": 30,
+                        "observed": result["observed"], "expected": result["expected"],
+                        "arrival_model": config.arrival_model,
+                        "scores": {
+                            "z_score": by_detector["standardized_residual"]["score"],
+                            "cusum": by_detector["cusum"]["score"],
+                            "log_likelihood_ratio": by_detector[likelihood_name]["score"],
+                        },
+                    }
+                    self.store.add_event(run_id, window.end, "detector", "anomaly_alert",
+                                         {"schema_version": 1,
+                                          "metric": "support_ticket_arrivals", "category": category,
+                                          "window_index": window.index, "window_start": window.start,
+                                          "window_end": window.end, "ticket_count": result["observed"],
+                                          "expected": result["expected"], "signal": signal,
+                                          "scores": scores,
+                                          "statistical_episode": transition_by_category.get(category),
+                                          "detectors_triggered": triggered,
+                                          "observation_evidence_id": observation["evidence_id"],
+                                          "window_score_evidence_id": score_event["evidence_id"]})
+                # Episode and initial job are created/acknowledged atomically.
+                detector_host.deliver_pending(automatic=automatic)
                 if config.tick_delay_seconds > 0:
                     time.sleep(config.tick_delay_seconds)
             self.store.set_run_status(run_id, "completed")
         except Exception as exc:  # keep a visible error state for the local operator
             self.store.set_run_status(run_id, "failed", str(exc))
+
+    def _run_investigation_mode(self, run_id: str) -> str:
+        run = self.store.get_run(run_id)
+        return str((run or {}).get("config", {}).get("investigation_mode", "automatic"))
 
     def control_run(self, run_id: str, action: str) -> dict[str, Any]:
         with self._lock:
@@ -319,6 +344,7 @@ class OperationsRuntime:
             ]
             if canonical_summaries:
                 report.episode_summaries = canonical_summaries
+            report.search_activity = summarize_search_trace(report.tool_trace)
             self.store.set_investigation(investigation_id, report.status, report.to_dict())
         except Exception as exc:
             self.store.add_investigation_event(
@@ -333,7 +359,12 @@ class OperationsRuntime:
         if investigation is None:
             return None
         report = investigation.get("report")
-        if not isinstance(report, dict) or report.get("episode_summaries"):
+        if not isinstance(report, dict):
+            return investigation
+
+        if "search_activity" not in report:
+            report["search_activity"] = summarize_search_trace(report.get("tool_trace", []))
+        if report.get("episode_summaries"):
             return investigation
 
         categories = list(dict.fromkeys(

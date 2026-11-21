@@ -6,7 +6,9 @@ A local, fictional operations-intelligence demo that detects category-specific s
 
 - A seeded 72-hour simulator for payment authorization, order-queue, and carrier-service incidents, plus healthy, unrelated-change, and resolved-issue controls.
 - Poisson and negative-binomial ticket arrivals, scored with likelihood ratios, standardized residuals, upward CUSUM, and a Gamma–Poisson Bayes factor.
-- Synthetic, read-only evidence tools and an operator-triggered investigation that returns cited hypotheses.
+- Synthetic, read-only evidence tools and an automatic investigation for each new alert episode, with a manual follow-up action in the incident inbox.
+- Six grouped investigator tools search evidence, inspect service health, analyze customer themes, compare incident context, build a timeline, and retrieve advisory runbook guidance.
+- Each selected category gets a focused reference-library search; the report shows source counts and matching guide passages, with retrieval ranking details expandable.
 - One synthetic customer message per ticket, with observable reason, category, channel, and timestamp fields. Each message is the ticket record counted by the detector; no-contact customers are outside this dataset.
 - Deterministic investigator tools compare categories, rank ticket reasons/channels, build an incident timeline, and compare before/after ticket and service-error rates.
 - Customer-message themes are compared with an equal-length pre-incident baseline. Text searches use keyword and semantic similarity; service logs use structured fields and a strict investigation-time cutoff.
@@ -17,6 +19,10 @@ A local, fictional operations-intelligence demo that detects category-specific s
 - Joint focus-window analysis in chronological order: T-2, T-1, T, and T+1 when available, with exact UTC intervals, ticket counts, service errors, and scoped citations.
 
 All incident, ticket, service, issue, and change records are fictional and generated from a reproducible seed. No external incident data is needed.
+
+See [Alert-to-RCA integration](docs/design/alert-retrieval-rca-integration.md) for the component boundaries, tool contract, evidence-time rules, evaluation plan, and an interview-ready architecture explanation.
+
+The [continuous detection and incident investigation architecture](docs/design/event-driven-incident-system.md) is implemented as a local prototype: count alerts are saved to a SQLite outbox, opened episodes create investigation jobs, and the incident inbox shows reports and retrieved passages. It uses one API process and one background worker; replay restart, automatic evidence-triggered follow-ups, and production-grade job recovery remain future work.
 
 ### Synthetic evidence corpus and retrieval
 
@@ -69,6 +75,8 @@ uv run python scripts/evaluate_search.py
 ```
 
 The model files are downloaded on first use and cached by Hugging Face. The index itself is local and ignored by Git. Search across the archived data is available when the index has been built; the current simulation records remain searchable separately.
+
+If you install or repair the GPU search dependencies while the API is already running, restart the API. A saved report keeps the search result from when it was created; start a new investigation to search the archive again.
 
 In the first PowerShell terminal, from the repository root, start the API on `127.0.0.1:8000`:
 

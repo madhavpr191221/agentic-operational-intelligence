@@ -3,6 +3,8 @@ import unittest
 from pathlib import Path
 
 from agentic_ops.agent import MockInvestigator
+from agentic_ops.agent import _collect_evidence_refs
+from agentic_ops.domain import EvidenceRef
 from agentic_ops.evidence import EvidenceTools
 from agentic_ops.store import EventStore
 
@@ -26,6 +28,25 @@ class EvidenceTests(unittest.TestCase):
 
     def test_investigator_evidence_tools_do_not_recompute_detection(self):
         self.assertFalse(hasattr(EvidenceTools, "run_anomaly_detection"))
+
+    def test_citations_keep_event_time_availability_time_and_document_location(self):
+        references: dict[str, EvidenceRef] = {}
+        _collect_evidence_refs({"evidence_id": "archive:guide:section-1",
+                                "source": "knowledge_docs",
+                                "observed_at": "2025-11-03T12:00:00Z",
+                                "available_at": "2025-11-05T09:00:00Z",
+                                "payload": {"title": "Gateway guide", "section_title": "Timeouts",
+                                            "source_path": "data/knowledge_base/gateway.md"}}, references)
+        citation = references["archive:guide:section-1"]
+        self.assertEqual(citation.observed_at, "2025-11-03T12:00:00Z")
+        self.assertEqual(citation.available_at, "2025-11-05T09:00:00Z")
+        self.assertEqual(citation.section_title, "Timeouts")
+        self.assertEqual(citation.source_path, "data/knowledge_base/gateway.md")
+
+    def test_category_service_mapping_is_a_public_evidence_boundary(self):
+        self.assertEqual(EvidenceTools.service_for_category("payments"), "checkout-payments")
+        with self.assertRaisesRegex(ValueError, "Unsupported support category"):
+            EvidenceTools.service_for_category("unknown")
 
     def test_mock_investigator_cites_tool_returned_evidence(self):
         self.store.add_event(self.run_id, "2026-01-01T00:00:00Z", "issue_tracker", "issue_created",
