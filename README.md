@@ -8,6 +8,7 @@ A local, fictional operations-intelligence demo that detects category-specific s
 - Poisson and negative-binomial ticket arrivals, scored with likelihood ratios, standardized residuals, upward CUSUM, and a Gamma–Poisson Bayes factor.
 - Synthetic, read-only evidence tools and an operator-triggered investigation that returns cited hypotheses.
 - Six grouped investigator tools search evidence, inspect service health, analyze customer themes, compare incident context, build a timeline, and retrieve advisory runbook guidance.
+- Each selected category gets a focused reference-library search; the report shows source counts and matching guide passages, with retrieval ranking details expandable.
 - One synthetic customer message per ticket, with observable reason, category, channel, and timestamp fields. Each message is the ticket record counted by the detector; no-contact customers are outside this dataset.
 - Deterministic investigator tools compare categories, rank ticket reasons/channels, build an incident timeline, and compare before/after ticket and service-error rates.
 - Customer-message themes are compared with an equal-length pre-incident baseline. Text searches use keyword and semantic similarity; service logs use structured fields and a strict investigation-time cutoff.
@@ -72,6 +73,8 @@ uv run python scripts/evaluate_search.py
 ```
 
 The model files are downloaded on first use and cached by Hugging Face. The index itself is local and ignored by Git. Search across the archived data is available when the index has been built; the current simulation records remain searchable separately.
+
+If you install or repair the GPU search dependencies while the API is already running, restart the API. A saved report keeps the search result from when it was created; start a new investigation to search the archive again.
 
 In the first PowerShell terminal, from the repository root, start the API on `127.0.0.1:8000`:
 

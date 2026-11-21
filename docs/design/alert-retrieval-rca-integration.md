@@ -41,13 +41,13 @@ count-only detector ---> alert episode ---> operator selects episode
 
 The application service validates the selected run and episode, builds the deterministic episode summary, and starts the investigation only after operator action. The summary carries the whole episode and a local focus group of up to `T-2`, `T-1`, `T`, and `T+1`, in chronological order when those windows exist. It records the exact half-open UTC intervals and identifies the selected focus window. Records after the declared investigation cutoff are excluded.
 
-The LLM receives the validated signal and evidence returned by tools. It does not receive simulation truth or detector implementation state. The event store persists progress and the final report.
+The LLM receives the validated signal and evidence returned by tools. It does not receive simulation truth or detector implementation state. The event store persists progress and the final report. Each selected category receives at least one focused operational-document search using an observed symptom or service name; missing indexes and empty results are reported as such.
 
 ### Retrieval and evidence
 
 The current run store supplies incident-specific records. The local archive supplies historical tickets, issues, changes, operational documents, and runbooks. Text search combines lexical and vector candidates, reciprocal-rank fusion, and reranking. Filters for category, source, service, and availability time apply before results are returned. Product logs are numeric structured telemetry and use exact service/time filters rather than embeddings.
 
-Evidence citations retain a stable evidence ID, source, event time, availability time when known, and document location such as section or PDF page. The report composer may cite only evidence returned during that investigation. A missing local archive is surfaced as unavailable; successful current-run searches are still usable, but the investigator must not claim it searched unavailable archive material.
+Evidence citations retain a stable evidence ID, source, event time, availability time when known, and document location such as section or PDF page. The report composer may cite only evidence returned during that investigation. A missing local archive is surfaced as unavailable; successful current-run searches are still usable, but the investigator must not claim it searched unavailable archive material. A normalized search activity summary records each query, source count, archive readiness, and up to five document passages for the report UI. Older reports derive this summary from their existing search trace.
 
 ### Investigator tool contract
 
@@ -66,7 +66,7 @@ The agent must inspect all six evidence views for each selected category, then m
 
 ## Report and safety rules
 
-The report contains a short overall summary, a finding per selected category, ranked hypotheses with supporting and contradicting citations, unresolved questions, and non-executing recommended next steps with verification checks. It must distinguish evidence for an immediate service problem from proof of its underlying technical cause. Weak or conflicting evidence yields an abstention. Citation IDs are validated against the investigation's returned evidence before persistence.
+The report contains a short overall summary, a finding per selected category, ranked hypotheses with supporting and contradicting citations, readable search activity with retrieved document passages, unresolved questions, and non-executing recommended next steps with verification checks. Search ranking details stay collapsed by default. It must distinguish evidence for an immediate service problem from proof of its underlying technical cause. Weak or conflicting evidence yields an abstention. Citation IDs are validated against the investigation's returned evidence before persistence.
 
 Tickets, logs, and documents are untrusted data, not instructions. Tool arguments are validated against the selected categories, source allowlist, time bounds, result limits, and evidence IDs already returned. No tool can deploy, roll back, page, or mutate an external system.
 

@@ -64,6 +64,7 @@ class RuntimeTests(unittest.TestCase):
         ticket_evidence = [item for item in report["evidence"] if item["source"] == "support_tickets"]
         self.assertTrue(any(item["summary"] != "ticket_created" for item in ticket_evidence))
         self.assertTrue(report["recommendations"])
+        self.assertTrue(report["search_activity"])
         for recommendation in report["recommendations"]:
             self.assertTrue(set(recommendation["supporting_evidence"]).issubset(evidence_ids))
 

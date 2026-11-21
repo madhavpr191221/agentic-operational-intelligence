@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -54,9 +55,22 @@ class AgentToolContractTests(unittest.IsolatedAsyncioTestCase):
 
             with patch("agentic_ops.agent.Agent", side_effect=capture_agent), \
                     patch("agentic_ops.agent.Runner.run_streamed", return_value=FinishedStream()), \
+                    patch.object(tools, "search_tickets", return_value={"tickets": [], "count": 0}) as search_tickets, \
+                    patch.object(tools, "search_operational_docs", return_value={"passages": [], "count": 0}) as search_docs, \
                     patch.object(investigator, "_compose_report",
                                  new=AsyncMock(return_value=RCAReport("abstained", "No cause", [], []))):
                 await investigator._investigate("run-id", "What changed?", tools, context, None)
+                search_tool = next(tool for tool in captured["tools"] if tool.name == "search_evidence")
+                context = SimpleNamespace(tool_name="search_evidence", _function_tool_arguments=None,
+                                          run_config=None)
+                output = await search_tool.on_invoke_tool(context, json.dumps({
+                    "category": "payments", "query": "authorization timeout",
+                    "sources": ["customer_tickets"], "limit": 5,
+                }))
+                parsed = json.loads(output)
+                self.assertIn("operational_docs", parsed["results"])
+                search_tickets.assert_called_once()
+                search_docs.assert_called_once()
 
         actual = {tool.name for tool in captured["tools"]}
         self.assertEqual(actual, expected)

@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from agentic_ops.domain import CATEGORIES, CategoryFinding, EvidenceRef, Hypothesis, RCAReport, Recommendation
 from agentic_ops.evidence import EvidenceTools
+from agentic_ops.search_activity import summarize_search_trace
 
 ProgressCallback = Callable[[dict[str, Any]], Any] | None
 _agent_loop: asyncio.AbstractEventLoop | None = None
@@ -250,6 +251,7 @@ class OpenAIInvestigator(Investigator):
         budget_reached = False
         calls_started = 0
         tool_calls: dict[str, int] = {}
+        document_search_attempted: set[str] = set()
         cached_results: dict[str, str] = {}
         cached_raw_results: dict[str, dict[str, Any]] = {}
         aliases_by_evidence: dict[str, str] = {}
@@ -326,7 +328,8 @@ class OpenAIInvestigator(Investigator):
 
         @function_tool(name_override="search_evidence", description_override=(
             "Search customer tickets, issue records, change records, and operational documents. "
-            "Choose only relevant source groups. Results are restricted to the selected category "
+            "Choose relevant source groups; the first search for each category also checks operational documents. "
+            "Results are restricted to the selected category "
             "and investigation time bounds; document search uses hybrid keyword and semantic retrieval."))
         def search_evidence(category: str, query: str,
                             sources: list[Literal["customer_tickets", "issues", "changes", "operational_docs"]],
@@ -337,6 +340,9 @@ class OpenAIInvestigator(Investigator):
             if not sources or any(source not in allowed_sources for source in sources):
                 raise ValueError("Choose one or more supported evidence source groups.")
             selected_sources = list(dict.fromkeys(sources))
+            if category not in document_search_attempted:
+                selected_sources = list(dict.fromkeys([*selected_sources, "operational_docs"]))
+                document_search_attempted.add(category)
             limit = max(1, min(5, limit))
 
             def search_selected_sources() -> dict[str, Any]:
@@ -476,7 +482,9 @@ class OpenAIInvestigator(Investigator):
                 "Do not diagnose each window independently. If fewer windows exist at a run boundary, reason from the available group and state its exact time range. "
                 "Evidence outside the selected focus group, including older logs and open issues, may support or qualify the finding, but explicitly treat it as additional context rather than evidence inside the focus group. "
                 "Search evidence within the selected episode and its preceding context; active issues may predate that context. "
-                "For each selected category, search relevant text sources with search_evidence; inspect structured "
+                "For each selected category, search relevant text sources with search_evidence and include at least one focused "
+                "operational_docs search using a customer symptom or service name. This ensures relevant guides and runbooks "
+                "are checked rather than assumed. State when the archive index is unavailable or no passages match. Inspect structured "
                 "service metrics with query_service_health; compare ticket themes and contributors with "
                 "analyze_customer_tickets; compare the episode with other categories and its prior period using "
                 "compare_incident_context; and build a timeline with build_incident_timeline. Search operational "
@@ -530,6 +538,7 @@ class OpenAIInvestigator(Investigator):
                                                 budget_reached, on_progress)
             report.episode_summaries = [signal["episode_summary"] for signal in signals
                                         if isinstance(signal.get("episode_summary"), dict)]
+            report.search_activity = summarize_search_trace(trace)
             return report
         except MaxTurnsExceeded:
             if on_progress:
@@ -539,7 +548,7 @@ class OpenAIInvestigator(Investigator):
                         "The investigator reached its turn ceiling before resolving this category.",
                         ["What evidence would distinguish the remaining explanations?"])
                         for category in selected_categories]
-            return RCAReport(status="incomplete",
+            report = RCAReport(status="incomplete",
                              summary="The investigation reached its agent-turn safety ceiling before it could produce a complete report.",
                              hypotheses=[], evidence=list(evidence_by_id.values()),
                              unresolved_questions=["What explanation best fits the evidence collected so far?"],
@@ -547,6 +556,8 @@ class OpenAIInvestigator(Investigator):
                               recommendations=_recommendations_from_trace(trace, selected_categories, set(evidence_by_id)),
                               episode_summaries=[signal["episode_summary"] for signal in signals
                                                  if isinstance(signal.get("episode_summary"), dict)])
+            report.search_activity = summarize_search_trace(trace)
+            return report
 
     async def _compose_report(self, question: str, signals: list[dict[str, Any]],
                               selected_categories: list[str], notes: InvestigationNotes,

@@ -19,6 +19,24 @@ type Run = {
 }
 
 type EvidenceItem = { evidence_id: string; source: string; observed_at: string; available_at?: string | null; summary: string; window_index?: number | null; page_number?: number | null; source_path?: string | null; section_title?: string | null }
+type SearchActivity = {
+  category?: string | null
+  query: string
+  available_through?: string | null
+  archive_index_ready?: boolean | null
+  sources: Array<{ source: string; label: string; count: number; error?: string | null }>
+  documents: Array<{
+    evidence_id?: string | null
+    source?: string | null
+    title: string
+    section_title?: string | null
+    page_number?: number | null
+    snippet: string
+    available_at?: string | null
+    source_path?: string | null
+    retrieval: Record<string, unknown>
+  }>
+}
 type FocusWindow = {
   window_index: number
   available?: boolean
@@ -117,6 +135,25 @@ function EvidenceList({ ids, evidenceMap, contradiction = false }: { ids: string
   </>
 }
 
+function SearchActivityPanel({ activities }: { activities: SearchActivity[] }) {
+  return <section className="search-activity" aria-label="Evidence search activity">
+    <div className="search-activity-heading"><div><strong>Related records and guides</strong><small>Text evidence retrieved during this investigation.</small></div><span>{activities.length} {activities.length === 1 ? 'search' : 'searches'}</span></div>
+    {!activities.length ? <p className="search-activity-empty">No text search was recorded for this report. Start a new investigation to include guide and archive searches.</p> : <div className="search-activity-list">{activities.map((activity, index) => <article className="search-activity-item" key={`${activity.category}-${activity.query}-${index}`}>
+      <div className="search-activity-meta"><strong>{activity.category || 'Investigation'}</strong><span>{activity.query ? `“${activity.query}”` : 'Search'}</span></div>
+      <div className="search-source-counts">{activity.sources.map((source) => <span key={source.source} className={source.error ? 'is-unavailable' : ''}>{source.label} · {source.error ? 'unavailable' : source.count}</span>)}</div>
+      {activity.archive_index_ready === false && <p className="search-activity-note">The local document archive is not indexed. Results may include only records from this run.</p>}
+      {activity.sources.some((source) => source.source === 'operational_docs' && source.error) && <p className="search-activity-note">Reference search was unavailable when this report was created. Install the local search stack with <code>uv sync --locked --extra rag-gpu</code>, restart the API, then start a new investigation.</p>}
+      {activity.documents.length ? <div className="retrieved-documents">{activity.documents.slice(0, 3).map((document, documentIndex) => <article className="retrieved-document" key={document.evidence_id || `${document.title}-${documentIndex}`}>
+        <div><strong>{document.title}</strong><span>{document.source === 'runbooks' ? 'Runbook' : 'Reference'}</span></div>
+        {(document.section_title || document.page_number) && <small>{[document.section_title, document.page_number ? `Page ${document.page_number}` : null].filter(Boolean).join(' · ')}</small>}
+        <p>{document.snippet}</p>
+        <details className="retrieval-details"><summary>How this passage ranked</summary><div>{document.retrieval.keyword_rank != null && <span>Keyword result {String(document.retrieval.keyword_rank)}</span>}{document.retrieval.vector_rank != null && <span>Meaning-based result {String(document.retrieval.vector_rank)}</span>}{document.retrieval.reranker_rank != null && <span>Final rank {String(document.retrieval.reranker_rank)}</span>}{document.retrieval.rrf_score != null && <span>Combined score {String(document.retrieval.rrf_score)}</span>}{document.retrieval.reranker_score != null && <span>Reranking score {String(document.retrieval.reranker_score)}</span>}{document.available_at && <span>Available {timeLabel(document.available_at)}</span>}{document.source_path && <span>{document.source_path}</span>}</div></details>
+      </article>)}</div> : <p className="search-activity-empty">No guide or reference passages matched this search.</p>}
+      <details className="search-scope-details"><summary>Search scope</summary><span>Available through {activity.available_through ? timeLabel(activity.available_through) : 'the investigation cutoff'}.</span>{activity.archive_index_ready === true && <span>Local reference archive searched.</span>}</details>
+    </article>)}</div>}
+  </section>
+}
+
 function exactTimestamp(value: string) {
   return `${new Date(value).toLocaleString('en-GB', {
     timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit',
@@ -197,6 +234,7 @@ type Investigation = {
     status: string
     summary: string
     episode_summaries?: EpisodeSummary[]
+    search_activity?: SearchActivity[]
     hypotheses: Array<{
       rank: number
       title: string
@@ -805,6 +843,7 @@ function App() {
               const categorySummaries = episodeReportSummaries.filter((item) => hypothesis.categories?.includes(item.category))
               return <article className="hypothesis" key={`shared-${hypothesis.rank}-${hypothesis.title}`}><div className="hypothesis-main"><h3>{hypothesis.title}</h3><p>{hypothesis.explanation}</p><small>Affects: {hypothesis.categories?.join(', ')}</small><div className="report-evidence-group"><span>Supporting evidence by scope</span><ScopedEvidenceList ids={hypothesis.supporting_evidence} evidenceMap={evidenceMap} focusSummaries={categorySummaries} /></div></div></article>
             })}</section>}
+            <SearchActivityPanel activities={report.search_activity ?? []} />
             {reportQuestions.length > 0 && <section className="unresolved report-unknown"><strong>What remains unknown</strong>{reportQuestions.map((item) => <p key={item}>{item}</p>)}</section>}
             {(report.recommendations ?? []).length > 0 && <section className="recommendations"><div className="recommendation-heading"><h3>Recommended next step</h3><span>ADVISORY ONLY</span></div>{(report.recommendations ?? []).map((item) => <article className="recommendation" key={`${item.category}-${item.runbook_id ?? item.title}`}><strong>{item.title}</strong><p>{item.next_step}</p><small><b>Verify:</b> {item.verification}</small>{item.supporting_evidence.length > 0 && <div className="report-evidence-group"><span>Based on evidence by scope</span><ScopedEvidenceList ids={item.supporting_evidence} evidenceMap={evidenceMap} focusSummaries={episodeReportSummaries.filter((summary) => summary.category === item.category)} /></div>}</article>)}</section>}
             <details className="evidence-details"><summary>All evidence records · {report.evidence.length}</summary>

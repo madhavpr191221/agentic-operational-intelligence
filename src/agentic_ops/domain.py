@@ -95,6 +95,7 @@ class RCAReport:
     category_findings: list[CategoryFinding] = field(default_factory=list)
     recommendations: list[Recommendation] = field(default_factory=list)
     episode_summaries: list[dict[str, Any]] = field(default_factory=list)
+    search_activity: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

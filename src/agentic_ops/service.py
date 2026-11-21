@@ -22,6 +22,7 @@ from agentic_ops.domain import CATEGORIES, SimulationConfig
 from agentic_ops.evidence import EvidenceTools
 from agentic_ops.simulation import generate_run
 from agentic_ops.retrieval import load_knowledge_passages, load_runbook_pages
+from agentic_ops.search_activity import summarize_search_trace
 from agentic_ops.store import EventStore
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -319,6 +320,7 @@ class OperationsRuntime:
             ]
             if canonical_summaries:
                 report.episode_summaries = canonical_summaries
+            report.search_activity = summarize_search_trace(report.tool_trace)
             self.store.set_investigation(investigation_id, report.status, report.to_dict())
         except Exception as exc:
             self.store.add_investigation_event(
@@ -333,7 +335,12 @@ class OperationsRuntime:
         if investigation is None:
             return None
         report = investigation.get("report")
-        if not isinstance(report, dict) or report.get("episode_summaries"):
+        if not isinstance(report, dict):
+            return investigation
+
+        if "search_activity" not in report:
+            report["search_activity"] = summarize_search_trace(report.get("tool_trace", []))
+        if report.get("episode_summaries"):
             return investigation
 
         categories = list(dict.fromkeys(
