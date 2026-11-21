@@ -32,24 +32,30 @@ class ReplayProfile:
 
 # Fixed, reviewable demo pool. The common four-day baseline is generated from
 # a separate fixed seed; these seeds control only the streamed three days.
+LIVE_REPLAY_INCIDENT_START_WINDOW = 216
 LIVE_REPLAY_PROFILES = (
     ReplayProfile(2101, "none", None),
     ReplayProfile(2102, "none", None),
     ReplayProfile(2103, "none", None),
     ReplayProfile(2104, "none", None),
-    ReplayProfile(2201, "mild", 204),
-    ReplayProfile(2202, "mild", 252),
-    ReplayProfile(2203, "mild", 300),
-    ReplayProfile(2301, "severe", 216),
-    ReplayProfile(2302, "severe", 264),
-    ReplayProfile(2303, "severe", 312),
+    ReplayProfile(2201, "mild", LIVE_REPLAY_INCIDENT_START_WINDOW),
+    ReplayProfile(2202, "mild", LIVE_REPLAY_INCIDENT_START_WINDOW),
+    ReplayProfile(2203, "mild", LIVE_REPLAY_INCIDENT_START_WINDOW),
+    ReplayProfile(2301, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW),
+    ReplayProfile(2302, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW),
+    ReplayProfile(2303, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW),
 )
 LIVE_REPLAY_BASELINE_SEED = 20260401
 
 
-def choose_live_replay_profile() -> ReplayProfile:
-    """Choose uniformly from the fixed demo pool, with replacement."""
-    return secrets.choice(LIVE_REPLAY_PROFILES)
+def choose_live_replay_profile(severity: str | None = None) -> ReplayProfile:
+    """Choose uniformly from the fixed demo pool, optionally by severity."""
+    profiles = LIVE_REPLAY_PROFILES
+    if severity is not None:
+        profiles = tuple(profile for profile in profiles if profile.severity == severity)
+        if not profiles:
+            raise ValueError(f"No live replay profiles exist for severity {severity!r}")
+    return secrets.choice(profiles)
 
 
 def generate_live_week(config: SimulationConfig) -> list[GeneratedWindow]:

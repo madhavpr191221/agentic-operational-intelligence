@@ -19,6 +19,7 @@ type StreamEvent = {
   payload: Record<string, any>
 }
 type Evidence = { evidence_id: string; source: string; observed_at: string; summary: string }
+type Recommendation = { category: string; runbook_id: string | null; title: string; next_step: string; verification: string; supporting_evidence: string[] }
 type Report = {
   status: string
   summary: string
@@ -26,6 +27,7 @@ type Report = {
   hypotheses: Array<{ rank: number; title: string; explanation: string; supporting_evidence: string[]; contradicting_evidence: string[] }>
   evidence: Evidence[]
   unresolved_questions: string[]
+  recommendations?: Recommendation[]
   search_activity?: Array<{
     category?: string | null; query: string
     sources: Array<{ source: string; label: string; count: number; error?: string | null }>
@@ -40,7 +42,8 @@ type Incident = {
   investigations: Job[]
 }
 type IncidentView = { incident: Incident; latestJob?: Job; lastReport?: Job }
-type Health = { investigator_mode: string }
+type Health = { investigator_mode: string; openai_key_configured: boolean }
+type AlertLevel = 'normal' | 'medium' | 'high'
 type DetectorScore = { detector: string; score: number; threshold: number; anomalous: boolean }
 type ScorePoint = { score: number; threshold: number }
 
@@ -60,6 +63,14 @@ function formatTime(value?: string | null) {
   return new Date(value).toLocaleString('en-GB', {
     timeZone: 'UTC', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
   }) + ' UTC'
+}
+const alertLevelNames: Record<AlertLevel, string> = {
+  normal: 'Normal', medium: 'Medium spike', high: 'High spike',
+}
+
+function runAlertLevel(value?: Run | null): AlertLevel {
+  const severity = value?.config.incident_severity
+  return severity === 'mild' ? 'medium' : severity === 'severe' ? 'high' : 'normal'
 }
 const detectorNames: Record<string, string> = {
   standardized_residual: 'Z-score', cusum: 'CUSUM',
@@ -128,8 +139,7 @@ export default function EventDrivenMonitor() {
   const [events, setEvents] = useState<StreamEvent[]>([])
   const [incidents, setIncidents] = useState<IncidentView[]>([])
   const [health, setHealth] = useState<Health | null>(null)
-  const [arrivalModel, setArrivalModel] = useState('poisson')
-  const [mode, setMode] = useState<'automatic' | 'manual'>('automatic')
+  const [alertLevel, setAlertLevel] = useState<AlertLevel>('high')
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     try { return localStorage.getItem('signalroom-theme') === 'light' ? 'light' : 'dark' } catch { return 'dark' }
   })
@@ -163,9 +173,8 @@ export default function EventDrivenMonitor() {
     }
     lastSequence.current = cursor || 0
     setRun(savedRun)
+    setAlertLevel(runAlertLevel(savedRun))
     setEvents(restored)
-    setMode(savedRun.config.investigation_mode === 'manual' ? 'manual' : 'automatic')
-    setArrivalModel(savedRun.arrival_model)
     setError('')
   }, [])
 
@@ -185,14 +194,16 @@ export default function EventDrivenMonitor() {
           return
         }
 
-        // A monitor page reload starts a new replay. Stop any prior live replay
-        // owned by this still-running API before creating the fresh one.
+        // A plain page load prepares the demo controls. It must not silently
+        // choose a random replay or start an OpenAI investigation.
         const activeRuns = recent.filter((item) => Number(item.config.monitor_history_windows ?? 0) > 0
           && ['preparing', 'running', 'queued', 'paused', 'stopping'].includes(item.status))
         await Promise.all(activeRuns.map((item) => jsonRequest(
           `/api/runs/${encodeURIComponent(item.run_id)}/controls/stop`, { method: 'POST' },
         ).catch(() => undefined)))
-        await startReplay()
+        setRun(null)
+        setEvents([])
+        setIncidents([])
       })().catch((issue) => {
         setError(issue instanceof Error ? issue.message : 'Could not start a fresh replay.')
       })
@@ -315,18 +326,20 @@ export default function EventDrivenMonitor() {
   const statusLabel = !run ? 'Ready to replay' : run.status === 'preparing' ? 'Preparing baseline'
     : run.status === 'running' ? 'Running' : run.status === 'completed' ? 'Replay complete' : run.status
   const runIsActive = Boolean(run && ['preparing', 'running', 'paused', 'stopping'].includes(run.status))
+  const openAiReady = health?.investigator_mode === 'openai' && health.openai_key_configured === true
   const countsHeading = liveWeek
     ? run?.status === 'completed'
       ? `Last window · ${formatReplayClock(latestObservation?.payload.window_start)} – ${formatReplayClock(latestObservation?.payload.window_end)}`
       : `Day ${Math.floor(currentWindowIndex / 48) + 1} · ${formatTime(windowStartAt(currentWindowIndex))} – ${formatTime(new Date(Date.parse(windowStartAt(currentWindowIndex)) + 30 * 60_000).toISOString())}`
     : latestObservation ? `Last window completed: ${formatTime(latestObservation.payload.window_end)}` : 'Waiting for the first completed window'
 
-  async function startReplay(seedOverride?: number) {
+  async function startReplay(seedOverride?: number, levelOverride?: AlertLevel) {
     if (busy) return
     setBusy(true); setError(''); setEvents([]); pendingEvents.current = []; setIncidents([]); lastSequence.current = 0
     try {
       const next = await jsonRequest<Run>('/api/runs', {
-        method: 'POST', body: JSON.stringify({ randomized_week: true, seed: seedOverride, arrival_model: arrivalModel, investigation_mode: mode }),
+        method: 'POST', body: JSON.stringify({ randomized_week: true, alert_level: levelOverride ?? alertLevel,
+          seed: seedOverride, arrival_model: 'poisson', investigation_mode: 'automatic' }),
       })
       setRun(next)
       setRuns((existing) => [next, ...existing.filter((item) => item.run_id !== next.run_id)].slice(0, 20))
@@ -346,7 +359,9 @@ export default function EventDrivenMonitor() {
       const message = issue instanceof Error ? issue.message : 'Could not control the replay.'
       if (message === 'Unknown run') {
         setRun(null)
-        await startReplay()
+        setEvents([])
+        setIncidents([])
+        setError('This replay is no longer available. Start a new demo to begin a fresh run.')
       } else setError(message)
     }
     finally { setControlBusy(false) }
@@ -396,17 +411,27 @@ export default function EventDrivenMonitor() {
       {error && <div className="error-banner"><span>!</span>{error}<button onClick={() => setError('')}>Dismiss</button></div>}
 
       <details className="replay-setup" open={!run}>
-        <summary>{run ? 'Replay settings' : 'Start a synthetic replay'}</summary>
+        <summary>{run ? 'Replay settings' : 'Choose a demo and start'}</summary>
         <div className="replay-fields">
-          <label className="field"><span>Ticket variation</span><select value={arrivalModel} onChange={(event) => setArrivalModel(event.target.value)}><option value="poisson">Baseline</option><option value="negative_binomial">Higher variation</option></select></label>
-          <label className="field"><span>Investigation</span><select value={mode} onChange={(event) => setMode(event.target.value as 'automatic' | 'manual')}><option value="automatic">Automatic</option><option value="manual">Manual</option></select></label>
-          <button className="primary-button" onClick={() => void startReplay()} disabled={busy || runIsActive}>{busy ? 'Preparing…' : run ? 'Start new replay' : 'Start replay'}</button>
+          <label className="field"><span>Alert level</span><select value={alertLevel} onChange={(event) => setAlertLevel(event.target.value as AlertLevel)}>
+            <option value="normal">Normal</option><option value="medium">Medium spike</option><option value="high">High spike</option>
+          </select></label>
+          <button className="primary-button" onClick={() => void startReplay()} disabled={busy || runIsActive || !openAiReady}>
+            {busy ? 'Preparing…' : run ? 'Start new demo' : 'Start demo'}
+          </button>
         </div>
-        <p className="replay-note">A fixed four-day history prepares the baseline. Three seeded days stream in about two minutes. {mode === 'automatic' ? `Automatic investigations use ${health?.investigator_mode === 'offline_demo' ? 'the offline demo investigator' : 'the configured investigator'}; OpenAI investigations may use credits.` : 'Manual mode records alerts and waits for you to start each investigation.'}</p>
+        <p className="replay-note">{alertLevel === 'normal'
+          ? 'No incident is planted; the detector still watches for unusual counts.'
+          : `${alertLevelNames[alertLevel]} uses a seeded payment incident; the detector decides when it alerts.`} Four days prepare the baseline, then three days stream in about two minutes. An alert starts an OpenAI investigation automatically.</p>
+        <p className={`openai-readiness ${openAiReady ? 'is-ready' : 'is-unavailable'}`} role="status">
+          {!health ? 'Checking OpenAI setup…' : health.investigator_mode !== 'openai'
+            ? 'OpenAI is required for this demo. Restart the app without offline mock mode.'
+            : health.openai_key_configured ? 'OpenAI investigator · key detected' : 'OpenAI key not found. Add OPENAI_API_KEY to the project .env file.'}
+        </p>
       </details>
 
-      {run && <div className="replay-toolbar"><span>{liveWeek ? 'Seven-day seeded replay' : scenarioNames[run.scenario] ?? run.scenario} · seed {run.seed} · {currentRunMode} investigation</span>
-        <div>{run.status === 'running' && <button disabled={controlBusy} onClick={() => void controlReplay('pause')}>Pause</button>}{run.status === 'paused' && <><button disabled={controlBusy} onClick={() => void controlReplay('resume')}>Resume</button><button disabled={controlBusy} onClick={() => void controlReplay('step')}>Step window</button></>}{['running', 'paused'].includes(run.status) && <button disabled={controlBusy} onClick={() => void controlReplay('stop')}>Stop</button>}{liveWeek && ['completed', 'stopped'].includes(run.status) && <button onClick={() => void startReplay(run.seed)} disabled={busy}>Replay this seed</button>}</div></div>}
+      {run && <div className="replay-toolbar"><span>{liveWeek ? `${alertLevelNames[runAlertLevel(run)]} · seven-day seeded replay` : scenarioNames[run.scenario] ?? run.scenario} · seed {run.seed} · {currentRunMode} investigation</span>
+        <div>{run.status === 'running' && <button disabled={controlBusy} onClick={() => void controlReplay('pause')}>Pause</button>}{run.status === 'paused' && <><button disabled={controlBusy} onClick={() => void controlReplay('resume')}>Resume</button><button disabled={controlBusy} onClick={() => void controlReplay('step')}>Step window</button></>}{['running', 'paused'].includes(run.status) && <button disabled={controlBusy} onClick={() => void controlReplay('stop')}>Stop</button>}{liveWeek && ['completed', 'stopped'].includes(run.status) && <button onClick={() => void startReplay(run.seed, runAlertLevel(run))} disabled={busy}>Replay this seed</button>}</div></div>}
       {run && liveWeek && <div className="replay-progress" role="progressbar" aria-valuenow={Math.round(Number(latestProgress?.payload.progress ?? 0) * 100)} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${Math.round(Number(latestProgress?.payload.progress ?? 0) * 100)}%` }} /></div>}
 
       <section className="counts-panel panel" aria-label="Latest category ticket counts">
@@ -474,6 +499,10 @@ export default function EventDrivenMonitor() {
           const additionalChecks = triggerNames.filter((name) => ['poisson_llr', 'negative_binomial_llr'].includes(name))
           const report = lastReport?.report
           const evidenceMap = new Map((report?.evidence ?? []).map((item) => [item.evidence_id, item]))
+          const recommendation = report?.recommendations?.find((item) => item.category === incident.category)
+            ?? report?.recommendations?.[0]
+          const retrievedGuides = report?.search_activity?.flatMap((activity) => activity.documents)
+            .filter((document) => document.source === 'runbooks') ?? []
           return <article className={`incident-card ${incident.status === 'active' ? 'is-alerting' : 'is-ended'}`} key={incident.incident_id}>
             <header className="incident-card-heading"><div><div className="section-kicker">{incident.status === 'active' ? 'NEW ALERT' : 'ALERT EPISODE ENDED'} — {incident.category.toUpperCase()}</div>
               <h2>Episode began {formatTime(incident.opened_at)}</h2><p>{totals.windows} alert {totals.windows === 1 ? 'window' : 'windows'} · {totals.tickets} tickets vs {totals.expected.toFixed(1)} expected</p></div>
@@ -492,6 +521,16 @@ export default function EventDrivenMonitor() {
             {latestJob?.status === 'failed' && <button className="secondary-button" onClick={() => void investigate(incident)}>Retry investigation</button>}
             {report && <section className="monitor-report"><div className="section-kicker">REPORT</div><h3>{report.hypotheses?.[0]?.title ?? (report.status === 'abstained' ? 'Not enough evidence to explain the alert' : 'Investigation findings')}</h3>
               <p>{report.summary}</p>
+              {recommendation && <section className="monitor-recommendation">
+                <div className="section-kicker">RECOMMENDED NEXT STEP · ADVISORY</div>
+                <h4>{recommendation.title}</h4>
+                <p>{recommendation.next_step}</p>
+                <p><strong>Verify:</strong> {recommendation.verification}</p>
+                {retrievedGuides[0] && <small>Reference guide: {retrievedGuides[0].title}</small>}
+                {recommendation.supporting_evidence.length > 0 && <details><summary>Why this step was recommended</summary>
+                  {recommendation.supporting_evidence.map((id) => { const item = evidenceMap.get(id); return <p key={id}>{item ? `${sourceNames[item.source] ?? 'Evidence'} · ${item.summary}` : 'Referenced evidence record'}</p> })}
+                </details>}
+              </section>}
               <details className="report-evidence-details"><summary>Evidence and retrieved guides</summary>
                 {report.hypotheses?.[0]?.explanation && <p>{report.hypotheses[0].explanation}</p>}
                 {report.hypotheses?.[0]?.supporting_evidence?.length ? <div className="report-citations"><strong>Evidence supporting this explanation</strong>{report.hypotheses[0].supporting_evidence.map((id) => { const item = evidenceMap.get(id); return <details key={id}><summary>{item ? `${sourceNames[item.source] ?? 'Evidence'} · ${formatTime(item.observed_at)}` : 'Evidence record'}</summary>{item && <p>{item.summary}</p>}</details> })}</div> : null}

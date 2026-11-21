@@ -72,6 +72,18 @@ class OperationsRuntime:
             return getattr(self._provided_investigator, "mode", "custom")
         return "offline_demo" if os.getenv("AGENT_MODE", "openai").casefold() == "mock" else "openai"
 
+    @property
+    def openai_key_configured(self) -> bool:
+        """Report key presence without exposing or loading the credential."""
+        if self._provided_investigator is not None:
+            return getattr(self._provided_investigator, "mode", "") == "openai"
+        if os.getenv("AGENT_MODE", "openai").casefold() == "mock":
+            return False
+        if os.getenv("OPENAI_API_KEY", "").strip():
+            return True
+        values = dotenv_values(REPOSITORY_ROOT / ".env")
+        return bool(str(values.get("OPENAI_API_KEY") or "").strip())
+
     def _investigator(self) -> Investigator:
         if self._provided_investigator is not None:
             return self._provided_investigator

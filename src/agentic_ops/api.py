@@ -19,6 +19,8 @@ from agentic_ops.simulation import LIVE_REPLAY_PROFILES, choose_live_replay_prof
 
 Speed = Literal["slow", "normal", "fast"]
 InvestigationMode = Literal["automatic", "manual"]
+AlertLevel = Literal["normal", "medium", "high"]
+ALERT_LEVEL_SEVERITY = {"normal": "none", "medium": "mild", "high": "severe"}
 
 
 class RunRequest(BaseModel):
@@ -29,6 +31,7 @@ class RunRequest(BaseModel):
     speed: Speed = "normal"
     investigation_mode: InvestigationMode = "automatic"
     randomized_week: bool = False
+    alert_level: AlertLevel | None = None
 
 
 class EpisodeSelection(BaseModel):
@@ -55,9 +58,10 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
     app.state.runtime = runtime or OperationsRuntime()
 
     @app.get("/api/health")
-    def health() -> dict[str, str]:
+    def health() -> dict[str, str | bool]:
         mode = app.state.runtime.investigator_mode
-        return {"status": "ok", "investigator_mode": mode}
+        return {"status": "ok", "investigator_mode": mode,
+                "openai_key_configured": app.state.runtime.openai_key_configured}
 
     @app.get("/api/incidents")
     def incidents(stream_id: str | None = None) -> list[dict]:
@@ -133,13 +137,21 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
 
     @app.post("/api/runs", status_code=202)
     def start_run(request: RunRequest) -> dict:
+        if request.alert_level is not None and not request.randomized_week:
+            raise HTTPException(status_code=422, detail="alert_level requires a seeded live replay")
+        if request.alert_level is not None and not app.state.runtime.openai_key_configured:
+            raise HTTPException(status_code=409, detail="The severity-based demo requires an OpenAI investigator and configured key")
         if request.randomized_week:
             if request.seed is None:
-                profile = choose_live_replay_profile()
+                severity = ALERT_LEVEL_SEVERITY.get(request.alert_level) if request.alert_level else None
+                profile = choose_live_replay_profile(severity)
             else:
                 profile = next((item for item in LIVE_REPLAY_PROFILES if item.seed == request.seed), None)
                 if profile is None:
                     raise HTTPException(status_code=422, detail="Seed is not in the live replay seed pool")
+                expected_severity = ALERT_LEVEL_SEVERITY.get(request.alert_level) if request.alert_level else None
+                if expected_severity is not None and profile.severity != expected_severity:
+                    raise HTTPException(status_code=422, detail="Seed does not match the selected alert level")
             config = SimulationConfig(
                 scenario="healthy" if profile.severity == "none" else "payment_issue",
                 seed=profile.seed,

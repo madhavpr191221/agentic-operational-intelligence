@@ -15,7 +15,7 @@ A local, fictional operations-intelligence demo that replays ticket activity, de
 - Four fictional runbooks have editable Markdown sources and searchable text PDFs. Service and dependency guidance, historical postmortems, and deployment guidance are additional searchable Markdown documents. Citations identify the source path and page or section.
 - Evidence-grounded fictional runbook suggestions include a verification check and never execute operational changes.
 - Empirically calibrated category-specific detector thresholds and held-out detector evaluation.
-- A live synthetic monitor that releases seeded ticket events over time, updates all category counts within each 30-minute window, and shows a small rolling sample of arriving tickets.
+- A live synthetic monitor with Normal, Medium spike, and High spike replay presets. It releases seeded ticket events over time, updates all category counts within each 30-minute window, and shows a small rolling sample of arriving tickets.
 - Automatic investigation by default, with a manual mode that records alerts and waits for an operator to start each investigation.
 - A seven-day seeded replay: four days of fixed history warm the existing detector, then three days stream over about two minutes. The stream can be paused, resumed, stepped by one 30-minute window, or replayed with the same seed. It ends explicitly and does not loop; it is synthetic replay, not a live external ticket connection.
 
@@ -81,7 +81,7 @@ If you install or repair the GPU search dependencies while the API is already ru
 
 For live investigations, copy `.env.example` to `.env` and set `OPENAI_API_KEY` in `.env`. OpenAI investigation is the default; the launcher clears any inherited mock-mode setting unless you pass `-Mock`.
 
-The backend reads the key when an investigation job runs. Automatic mode is the default, so starting a replay that emits an alert can use OpenAI API credits without another click. Choose Manual mode in replay settings to decide when to start each investigation. You may set `OPENAI_MODEL` in the shell to choose a model. Keep `.env` private; it is ignored by Git.
+The backend reads the key when an investigation job runs. The demo checks that an OpenAI key is configured before it lets you start, and runs investigations automatically when alerts appear. Starting a demo that emits alerts can use OpenAI API credits. You may set `OPENAI_MODEL` in the shell to choose a model. Keep `.env` private; it is ignored by Git.
 
 The live workflow uses one OpenAI Agents SDK agent with a bounded adaptive tool loop, followed by one structured report-composition pass with no tools. The offline mock demonstrates the same report and activity UI without calling a model.
 
@@ -103,7 +103,7 @@ Stop both services with:
 
 Or double-click `scripts/stop-dev.cmd`.
 
-The stop command stops only recognized services on ports `8000` and `5173`; it leaves other processes alone. For an offline demo without model calls, use `.\scripts\dev.ps1 -Mock`. The normal launch uses OpenAI by default and reads `OPENAI_API_KEY` from `.env` when an investigation runs. Automatic investigation can use API credits; choose Manual mode in replay settings to decide when to start each investigation. Keep `.env` private; it is ignored by Git.
+The stop command stops only recognized services on ports `8000` and `5173`; it leaves other processes alone. `-Mock` starts an offline demo, but the severity-based demo flow requires OpenAI and will be disabled in mock mode. Keep `.env` private; it is ignored by Git.
 
 If PowerShell blocks running local scripts, launch it with:
 
@@ -113,11 +113,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1
 
 Use the same command with `-Stop` to stop both services when the default policy blocks local scripts.
 
-1. Opening the main UI starts a fresh replay automatically and stops any previous active replay. A saved URL with a `?run=...` parameter opens that specific replay. The replay uses a seed from the fixed ten-seed pool. Automatic investigation is the default and can use OpenAI credits when an alert opens; choose Manual in Replay settings before starting another replay if you want to trigger investigations yourself.
+1. Opening the main UI no longer starts a replay. Expand **Replay settings**, choose **Normal**, **Medium spike**, or **High spike**, then press **Start demo**. The selected seed is shown; use **Replay this seed** to repeat it. A saved URL with `?run=...` still opens that specific replay.
 2. Days 1-4 load as fixed history to establish the detector baseline. Days 5-7 stream in about two minutes. Watch all four category counts update as tickets arrive; only completed 30-minute windows are scored, using the existing count-only detector. A scrolling sample shows recent ticket wording, while the counts include every ticket.
-3. When a category alerts, an episode appears under **Alerts and investigations**. In Automatic mode, the investigation starts on its own. The card shows whether it is queued, running, complete, or needs attention.
-4. Read the report summary, then expand **Evidence and retrieved guides** and **What remains uncertain** to inspect its evidence and limits. Recommendations are advisory; the app does not execute operational changes.
-5. Pause, resume, step, or stop a replay using its controls. Starting a new replay keeps earlier runs available in replay history.
+3. The Medium and High presets plant a payment spike at the same point in the replay, while Normal has no planted incident and can still produce a natural false alert. When a category alerts, its episode appears under **Alerts and investigations** and the investigation starts automatically. The card shows whether it is queued, running, complete, or needs attention.
+4. Read the report summary and the visible **Recommended next step**. Recommendations are advisory; the app does not execute operational changes. Expand **Evidence and retrieved guides** and **What remains uncertain** to inspect sources and limits.
+5. Pause, resume, step, or stop a replay using its controls. Starting a new replay keeps earlier runs available in replay history. OpenAI investigations can use API credits.
 
 Pause freezes simulated time; **Step window** releases the rest of the current window, scores it, then pauses again. **Replay complete** means the finite synthetic source ended; it does not mean the service recovered. The completed replay remains visible until you reload or start another one. This demo does not monitor a live ticket source. Replay workers do not resume after an API process restart.
 

@@ -111,6 +111,10 @@ if (-not (Test-Path (Join-Path $webRoot 'node_modules\vite\bin\vite.js'))) {
 }
 
 New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
+$stdinPath = Join-Path $runtimeDir 'service.stdin'
+if (-not (Test-Path -LiteralPath $stdinPath)) {
+    New-Item -ItemType File -Path $stdinPath | Out-Null
+}
 $originalAgentMode = $env:AGENT_MODE
 if ($Mock) { $env:AGENT_MODE = 'mock' }
 else { Remove-Item Env:AGENT_MODE -ErrorAction SilentlyContinue }
@@ -119,6 +123,7 @@ try {
     $api = Start-Process -FilePath $uv.Source `
         -ArgumentList @('run', 'python', '-m', 'uvicorn', 'agentic_ops.api:app', '--app-dir', 'src', '--host', '127.0.0.1', '--port', '8000') `
         -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru `
+        -RedirectStandardInput $stdinPath `
         -RedirectStandardOutput (Join-Path $runtimeDir 'api.stdout.log') `
         -RedirectStandardError (Join-Path $runtimeDir 'api.stderr.log')
     $started += [pscustomobject]@{ Name = 'api'; ProcessId = $api.Id }
@@ -126,6 +131,7 @@ try {
     $ui = Start-Process -FilePath $npm.Source `
         -ArgumentList @('run', 'dev', '--', '--host', '127.0.0.1', '--port', '5173', '--strictPort') `
         -WorkingDirectory $webRoot -WindowStyle Hidden -PassThru `
+        -RedirectStandardInput $stdinPath `
         -RedirectStandardOutput (Join-Path $runtimeDir 'web.stdout.log') `
         -RedirectStandardError (Join-Path $runtimeDir 'web.stderr.log')
     $started += [pscustomobject]@{ Name = 'web'; ProcessId = $ui.Id }
