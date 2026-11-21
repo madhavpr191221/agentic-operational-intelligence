@@ -39,11 +39,11 @@ The detector and investigator have separate inputs: the detector gets counts; th
 
 For the first implementation, these are modules inside **one backend application and one SQLite database**, not separate services. The evidence store, count detector, alert queue, investigator, and report can all run locally. Durable delivery and recovery still matter, but an outbox and a background worker can be added inside this same application. A message broker, multiple servers, and automatic cross-incident grouping are later options, not prerequisites.
 
-The full sections below describe reliability rules for when the project grows. They should not be read as a requirement to build every box before the first automatic investigation works. Evaluator-only scenario truth remains outside the runtime diagram and is used only in offline checks.
+The full sections below describe reliability rules for when the project grows. The local prototype keeps these responsibilities inside one application. Evaluator-only scenario truth remains outside the runtime diagram and is used only in offline checks.
 
 ## 3. Sequence diagram: one alert to report
 
-This shows how a completed window becomes a durable episode event, then one time-bounded investigation. Re-delivery is safe because the coordinator records each event ID as it applies its effect. The sequence describes the proposed flow; it is not implemented yet.
+This shows how a completed window becomes a durable episode event, then one time-bounded investigation. The first local implementation stores detector state, episode events, incidents, and the automatic initial job in SQLite. It uses a single API process and background worker.
 
 ```mermaid
 sequenceDiagram
@@ -93,7 +93,7 @@ sequenceDiagram
     end
 ```
 
-The count projection passes no message text or service records to the detector. Each investigation uses a fixed cutoff, so a later window cannot appear in revision 1. A later investigation may include that window and preserve the earlier report as revision 1. In manual mode, the coordinator leaves the initial job waiting for an operator request; all other steps and scope rules are the same.
+The count projection passes no message text or service records to the detector. Each investigation uses a fixed cutoff, so a later window cannot appear in revision 1. A later investigation may include that window and preserve the earlier report as revision 1. Investigation mode is chosen and saved per replay. In manual mode, the coordinator leaves the initial job waiting for an operator request; all other steps and scope rules are the same.
 
 ## 4. Components at a glance
 
@@ -117,16 +117,16 @@ The text index is part of the evidence-search capability. The alert queue can in
 
 | Area | Verified current implementation | Proposed change |
 | --- | --- | --- |
-| Detection | `CountObservation -> DetectionResult`; count-only module; consecutive category episodes | Keep the statistical rules. Add durable host state, input revisions, explicit episode lifecycle events, and recovery. |
-| Runtime | `OperationsRuntime` starts simulation and investigation daemon threads in the API process | Separate monitoring and investigation workers from the API lifetime. |
-| Initiation | Operator submits a run-scoped investigation request | Coordinator schedules a new episode automatically; manual requests use the same queue. |
-| Persistence | SQLite stores run events, investigation progress, reports, and embeddings | Add source cursors, alert outbox, incident registry, leased jobs, and report revisions. |
-| Retrieval | Current-run evidence plus local archive; keyword/vector retrieval and GPU reranking; structured service queries | Make version/snapshot rules explicit, expose source health and coverage, and allow full record inspection. |
-| Agent | Six grouped tools, a bounded investigation loop, and report composition | Seven tools; frozen context; explicit alternatives and missing evidence; durable job outcomes. |
-| UI | Simulation controls, category charts, episode selection, report and retrieved passages | Incident inbox first; focused incident detail; monitoring overview and replay controls on separate pages. |
-| Evaluation | Detector, retrieval, tool, and report checks; synthetic search benchmark | Add automatic delivery, crash recovery, progressive evidence, and end-to-end incident checks. |
+| Detection | `CountObservation -> DetectionResult`; count-only module; SQLite detector checkpoint; episode outbox and incident registry | Resume an interrupted replay and version detector configuration changes. |
+| Runtime | `OperationsRuntime` runs the replay and one investigation worker in the API process | Separate worker lifetimes only when the local demo needs independent processes. |
+| Initiation | Each replay stores its automatic or manual mode; automatic episodes queue an initial persisted job | Add durable replay resume and operator-configurable follow-up policy. |
+| Persistence | SQLite stores run events, detector checkpoints, outbox events, incidents, jobs, reports, and embeddings. Opening an episode and creating its initial job happen in one transaction. | Add leased jobs, provider-budget controls, report version metadata, and migration handling. Running jobs are marked for operator review after restart because a provider call may already have been billed. |
+| Retrieval | The worker freezes the event sequence and source-time cutoff; existing keyword/vector retrieval, GPU reranking, and structured service queries are used | Pin a specific archive-index generation and report source coverage more fully. |
+| Agent | Existing investigator runs through the persisted worker; reports include hypotheses, evidence references, unknowns, and retrieval activity | Add a single bounded read tool, explicit job resource budgets, and richer report revision comparisons. |
+| UI | One monitor view shows latest counts for all categories and the current replay's alert, investigation status, and report; prior replays remain in history | Add production data-source connectors and richer cross-incident browsing. |
+| Evaluation | Detector, retrieval, tool, report, host, and worker checks; synthetic search benchmark | Add full API restart/replay recovery, progressive evidence, and broader end-to-end incident evaluations. |
 
-The inspected code establishes a useful starting boundary; it does not establish that durable scheduling or snapshot isolation already exists. In particular, source availability filtering must be audited across all new adapters and tools during implementation.
+The prototype now has durable scheduling and run-evidence snapshot bounds for its local replay. It does not resume a replay after an API restart, pin a vector-index generation, or guarantee exactly-once provider billing. Source availability and the fixed cutoff are enforced for event searches; future connectors must preserve those rules.
 
 ## 6. Ownership and boundaries
 

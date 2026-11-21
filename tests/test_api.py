@@ -19,10 +19,13 @@ class ApiTests(unittest.TestCase):
             runtime = OperationsRuntime(EventStore(Path(directory) / "api.sqlite3"), MockInvestigator())
             client = TestClient(create_app(runtime))
             self.assertEqual(client.get("/api/health").json(), {"status": "ok"})
+            self.assertEqual(client.get("/api/incidents").json(), [])
+            self.assertEqual(client.get("/api/incidents/missing").status_code, 404)
             scenarios = client.get("/api/scenarios").json()
             self.assertEqual({item["id"] for item in scenarios},
                              {"payment_issue", "healthy", "unrelated_issue", "resolved_issue",
                               "orders_queue_backlog", "delivery_carrier_degradation"})
+            runtime.incident_worker.stop()
 
 
 if __name__ == "__main__":

@@ -16,6 +16,8 @@ Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
     ForEach-Object { Stop-Process -Id $_ -Force }
 ```
 
+For the event-driven prototype, choose Automatic or Manual investigation mode when starting each replay; Automatic is the default. Automatic mode investigates episode openings, relevant service or issue changes, and a final episode-ending update when it adds a newer evidence cutoff. The worker uses the OpenAI investigator by default and requires `OPENAI_API_KEY`; set `AGENT_MODE=mock` for offline reports. Automatic live investigations use API credits. The incident queue and detector checkpoints are persisted; replay workers do not resume after an API process restart.
+
 Use port `5173` for the UI. Verify the selected port is free before restarting; avoid terminating unrelated project processes. Saved investigation URLs reopen reports without another OpenAI call.
 
 ## Coding Style & Naming Conventions

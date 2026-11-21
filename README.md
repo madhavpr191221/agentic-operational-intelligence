@@ -6,7 +6,7 @@ A local, fictional operations-intelligence demo that detects category-specific s
 
 - A seeded 72-hour simulator for payment authorization, order-queue, and carrier-service incidents, plus healthy, unrelated-change, and resolved-issue controls.
 - Poisson and negative-binomial ticket arrivals, scored with likelihood ratios, standardized residuals, upward CUSUM, and a Gamma–Poisson Bayes factor.
-- Synthetic, read-only evidence tools and an operator-triggered investigation that returns cited hypotheses.
+- Synthetic, read-only evidence tools and an automatic investigation for each new alert episode, with a manual follow-up action in the incident inbox.
 - Six grouped investigator tools search evidence, inspect service health, analyze customer themes, compare incident context, build a timeline, and retrieve advisory runbook guidance.
 - Each selected category gets a focused reference-library search; the report shows source counts and matching guide passages, with retrieval ranking details expandable.
 - One synthetic customer message per ticket, with observable reason, category, channel, and timestamp fields. Each message is the ticket record counted by the detector; no-contact customers are outside this dataset.
@@ -21,6 +21,8 @@ A local, fictional operations-intelligence demo that detects category-specific s
 All incident, ticket, service, issue, and change records are fictional and generated from a reproducible seed. No external incident data is needed.
 
 See [Alert-to-RCA integration](docs/design/alert-retrieval-rca-integration.md) for the component boundaries, tool contract, evidence-time rules, evaluation plan, and an interview-ready architecture explanation.
+
+The [continuous detection and incident investigation architecture](docs/design/event-driven-incident-system.md) is implemented as a local prototype: count alerts are saved to a SQLite outbox, opened episodes create investigation jobs, and the incident inbox shows reports and retrieved passages. It uses one API process and one background worker; replay restart, automatic evidence-triggered follow-ups, and production-grade job recovery remain future work.
 
 ### Synthetic evidence corpus and retrieval
 

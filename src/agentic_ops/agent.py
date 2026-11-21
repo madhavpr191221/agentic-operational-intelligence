@@ -75,6 +75,8 @@ class Investigator:
 class MockInvestigator(Investigator):
     """Deterministic evidence-driven demo; it does not call an LLM."""
 
+    mode = "offline_demo"
+
     def investigate(self, run_id: str, question: str, evidence_tools: EvidenceTools,
                     alert_context: dict[str, Any] | None = None,
                     on_progress: ProgressCallback = None) -> RCAReport:
@@ -226,6 +228,8 @@ class MockInvestigator(Investigator):
 
 class OpenAIInvestigator(Investigator):
     """One adaptive tool-using agent with application-level safety ceilings."""
+
+    mode = "openai"
 
     MAX_TURNS = 40
     MAX_TOOL_CALLS = 32

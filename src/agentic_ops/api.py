@@ -12,9 +12,12 @@ from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
 from agentic_ops.domain import SimulationConfig
+from agentic_ops.detector_host import list_incidents
+from agentic_ops.incident_worker import schedule_job
 from agentic_ops.service import OperationsRuntime
 
 Speed = Literal["slow", "normal", "fast"]
+InvestigationMode = Literal["automatic", "manual"]
 
 
 class RunRequest(BaseModel):
@@ -23,6 +26,7 @@ class RunRequest(BaseModel):
     seed: int = 42
     arrival_model: Literal["poisson", "negative_binomial"] = "poisson"
     speed: Speed = "normal"
+    investigation_mode: InvestigationMode = "automatic"
 
 
 class EpisodeSelection(BaseModel):
@@ -39,13 +43,76 @@ class InvestigationRequest(BaseModel):
     episode_selections: list[EpisodeSelection] | None = Field(default=None, min_length=1, max_length=4)
 
 
+class IncidentInvestigationRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+
 def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
     app = FastAPI(title="Agentic Operational Intelligence", version="0.1.0")
     app.state.runtime = runtime or OperationsRuntime()
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
-        return {"status": "ok"}
+        mode = app.state.runtime.investigator_mode
+        return {"status": "ok", "investigator_mode": mode}
+
+    @app.get("/api/incidents")
+    def incidents(stream_id: str | None = None) -> list[dict]:
+        return list_incidents(app.state.runtime.store, stream_id)
+
+    @app.get("/api/incidents/{incident_id}")
+    def incident(incident_id: str) -> dict:
+        found = next((item for item in list_incidents(app.state.runtime.store)
+                      if item["incident_id"] == incident_id), None)
+        if found is None:
+            raise HTTPException(status_code=404, detail="Unknown incident")
+        with app.state.runtime.store._connection() as db:
+            jobs = db.execute("SELECT job_id,reason,cutoff,status,created_at,error FROM incident_jobs "
+                              "WHERE incident_id=? ORDER BY created_at,rowid", (incident_id,)).fetchall()
+        return {**found, "investigations": [dict(row) for row in jobs]}
+
+    @app.post("/api/incidents/{incident_id}/investigations", status_code=202)
+    def investigate_incident(incident_id: str, request: IncidentInvestigationRequest) -> dict:
+        try:
+            return schedule_job(app.state.runtime.store, incident_id, request.reason, request.idempotency_key)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/api/jobs/{job_id}")
+    def incident_job(job_id: str) -> dict:
+        with app.state.runtime.store._connection() as db:
+            row = db.execute("SELECT * FROM incident_jobs WHERE job_id=?", (job_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Unknown job")
+        result = dict(row)
+        result["report"] = json.loads(result.pop("report_json")) if result["report_json"] else None
+        return result
+
+    @app.get("/api/incidents/{incident_id}/reports/{revision}")
+    def incident_report(incident_id: str, revision: int) -> dict:
+        if revision < 1:
+            raise HTTPException(status_code=404, detail="Unknown report")
+        with app.state.runtime.store._connection() as db:
+            rows = db.execute("SELECT job_id,cutoff,report_json FROM incident_jobs "
+                              "WHERE incident_id=? AND status='completed' ORDER BY created_at,rowid",
+                              (incident_id,)).fetchall()
+        if revision > len(rows):
+            raise HTTPException(status_code=404, detail="Unknown report")
+        row = rows[revision - 1]
+        return {"incident_id": incident_id, "revision": revision, "job_id": row["job_id"],
+                "cutoff": row["cutoff"], "report": json.loads(row["report_json"])}
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    def cancel_job(job_id: str) -> dict:
+        with app.state.runtime.store._connection() as db:
+            updated = db.execute("UPDATE incident_jobs SET status='cancelled' WHERE job_id=? AND status='queued'",
+                                 (job_id,))
+        if not updated.rowcount:
+            raise HTTPException(status_code=409, detail="Job is not queued")
+        return {"job_id": job_id, "status": "cancelled"}
 
     @app.get("/api/scenarios")
     def scenarios() -> list[dict[str, str]]:
@@ -67,7 +134,7 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
         delay = {"slow": 0.45, "normal": 0.12, "fast": 0.025}[request.speed]
         config = SimulationConfig(scenario=request.scenario, seed=request.seed,
                                   arrival_model=request.arrival_model, tick_delay_seconds=delay)
-        return app.state.runtime.start_run(config)
+        return app.state.runtime.start_run(config, request.investigation_mode)
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str) -> dict:
