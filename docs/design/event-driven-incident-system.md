@@ -43,41 +43,47 @@ The full sections below describe reliability rules for when the project grows. T
 
 ## 3. Sequence diagram: one alert to report
 
-This shows one finalized alert window, the automatic first investigation, and a later report update. The sequence describes the proposed flow; it is not implemented yet.
+This shows how a completed window becomes a durable episode event, then one time-bounded investigation. Re-delivery is safe because the coordinator records each event ID as it applies its effect. The sequence describes the proposed flow; it is not implemented yet.
 
 ```mermaid
 sequenceDiagram
-    participant S as Data source
+    participant S as Ticket and system sources
     participant E as Evidence store and index
     participant C as Count projection
-    participant D as Detector
-    participant Q as Alert queue
+    participant D as Count-only detector
+    participant H as Detector host and outbox
+    participant Q as Investigation coordinator and queue
     participant W as Investigation worker and agent
-    participant T as Search and analysis tools
+    participant T as Analysis and retrieval tools
     participant R as Report store
     participant U as Incident inbox
 
     loop Each completed ticket window
-        S->>E: Save tickets and related records
-        E->>C: Provide ticket ID, category, and event time
-        C->>D: Send complete category counts only
-        D->>Q: Save alert episode opened or updated
+        S->>E: Save source records with event and availability times
+        E->>C: Provide ticket identity, category, and event time
+        C->>D: Send completed counts for all categories only
+        D->>H: Return scores, alert state, and episode transition
+        H->>H: Atomically save checkpoint and event in outbox
+        H->>Q: Deliver event with event ID and episode ID
+        Q->>Q: Check event ID and apply each event once
     end
 
-    Q->>W: Start one job with alert and evidence cutoff
-    W->>T: Compare tickets, service metrics, timeline, and guides
-    T->>E: Search records within the job scope
-    E-->>T: Return eligible records, passages, and coverage
-    T-->>W: Return evidence and source status
+    Q->>W: Queue one initial job when episode opens
+    W->>W: Pin episode version, exact windows, and evidence cutoff
+    W->>T: Compare tickets, service health, categories, and timeline
+    T->>E: Query structured evidence and search indexed records
+    E-->>T: Return only records visible by the pinned cutoff
+    T-->>W: Return evidence, citations, coverage, and source status
     Note right of W: Check explanations and citations before saving
     W->>R: Save report revision 1
     R-->>W: Confirm saved report
     R-->>U: Show finding and evidence
 
-    opt New material evidence arrives and policy allows a follow-up
+    opt Material new evidence arrives and configured mode allows a follow-up
         S->>E: Save newly available record or completed window
         E->>Q: Notify coordinator of a possible incident update
-        Q->>W: Start a follow-up with a new cutoff
+        Q->>Q: Apply significance, cooldown, and coalescing rules
+        Q->>W: Queue one follow-up with a new cutoff
         W->>T: Recheck the relevant evidence
         T->>E: Search using the new cutoff
         E-->>T: Return newly eligible evidence
@@ -87,7 +93,7 @@ sequenceDiagram
     end
 ```
 
-The count projection passes no message text or service records to the detector. Each investigation uses a fixed cutoff, so a later window cannot appear in revision 1. A later investigation may include that window and preserve the earlier report as revision 1.
+The count projection passes no message text or service records to the detector. Each investigation uses a fixed cutoff, so a later window cannot appear in revision 1. A later investigation may include that window and preserve the earlier report as revision 1. In manual mode, the coordinator leaves the initial job waiting for an operator request; all other steps and scope rules are the same.
 
 ## 4. Components at a glance
 
@@ -220,18 +226,24 @@ The first live report includes T and up to T-2/T-1 when present. It includes T+1
 
 The focus table is local detail around the selected window. The episode summary covers all episode windows known at that revision. Longer pre-incident history and earlier issues are additional context. Tools and reports must label which scope supports a number or claim. Use both start and end times for detector evidence; a result for a normal window should be labeled a count observation, not an alert.
 
-### Worked example: first alert and later evidence
+### Worked example: Payments windows become an investigation
 
-| Source-clock time | Event | System behavior |
-| --- | --- | --- |
-| 22:00 | Authorization errors begin; customer complaints follow | Evidence is ingested; no causal label is sent to detection. |
-| 22:32 | The 22:00-22:30 window finalizes: 30 tickets against about 4 expected; existing detector alerts | Persist an opened episode and queue revision 1. Its focus group contains the two earlier windows and the completed alert window. |
-| 22:36 | The worker finishes revision 1 | Report the likely payment symptom, supporting service evidence, missing diagnostics, and exact 22:32 availability cutoff. |
-| 22:50 | A new payment issue becomes visible | Queue a follow-up if policy permits. Revision 1 remains unchanged. |
-| 23:02 | The next window finalizes: 38 tickets; the episode continues | Coalesce a pending follow-up or request the next one under cooldown policy. The next report can compare both alert windows. |
-| Later | A window is no longer alerting | Mark the statistical episode ended. Do not declare the service recovered solely from this. |
+Assume the source sends complete 30-minute windows. The times, counts, and IDs below are illustrative. All categories continue to be counted; Payments is the category that opens this incident. Other category counts remain available as context and do not enter the Payments detector score.
 
-The example numbers illustrate lifecycle behavior; they do not recalibrate alert thresholds. Accelerating replay must not change evidence eligible for revision 1, although actual job completion uses wall-clock time.
+| Source-clock time | Payments window just completed | Count vs expected | Event and identity | System action and investigation scope |
+| --- | --- | --- | --- | --- |
+| 21:30 | 21:00–21:30 | 5 vs 4.1 | No alert | Save the count and advance detector state. |
+| 22:00 | 21:30–22:00 | 4 vs 4.1 | No alert | Continue monitoring. |
+| 22:30 | 22:00–22:30 | 30 vs 4.1 | `episode_opened`, event `evt-001`, episode `pay-2026-0042` | Save detector checkpoint and event together. Coordinator creates one Payments incident and queues its initial investigation. Its count comparison includes T (22:00–22:30), T-1 (21:30–22:00), and T-2 (21:00–21:30), when available. Evidence cutoff is 22:30. |
+| 22:36 | Investigation still uses the 22:30 snapshot | — | Job for `pay-2026-0042` | Agent checks ticket themes against baseline, service health, other-category counts, the event timeline, relevant issues/changes, and runbooks. Retrieval may find older records only if they were available by 22:30. It compares explanations, records contrary evidence and gaps, then saves a cited report. |
+| 22:50 | A payment issue becomes visible | — | Possible follow-up trigger | Coordinator checks whether the issue is material and follows the configured mode. In automatic mode it may queue or coalesce a follow-up; in manual mode it shows an update for operator review. The first report stays unchanged. |
+| 23:00 | 22:30–23:00 | 38 vs 4.1 | `episode_updated`, event `evt-002`, episode `pay-2026-0042` | Update episode scope. Do not start another initial investigation just because another 30-minute window alerted. A running job keeps its original cutoff. |
+| 23:30 | 23:00–23:30 | 5 vs 4.1 | `episode_ended`, event `evt-003`, episode `pay-2026-0042` | End statistical alert continuity. This alone does not establish service recovery. |
+| 00:00 | 23:30–00:00 | 29 vs 4.1 | `episode_opened`, event `evt-004`, episode `pay-2026-0043` | Open a new incident and queue its own initial investigation. |
+
+If the coordinator receives `evt-002` twice after a restart, it applies the update once. The event ID stays the same on retry; a genuinely new window gets a new event ID. Consecutive alert windows share the episode ID, while a later episode gets a new one.
+
+For the first investigation, the selected alert window and up to two preceding windows form the exact local comparison. The agent also searches older, relevant evidence under the same 22:30 availability cutoff; it does not treat a two-window neighborhood as the limit for every source. A later report revision can use newly available information with a newer cutoff and preserves the original report. Accelerated replay must not change evidence eligible for the first revision, although job completion uses wall-clock time.
 
 ## 12. Investigator workflow and seven tools
 
