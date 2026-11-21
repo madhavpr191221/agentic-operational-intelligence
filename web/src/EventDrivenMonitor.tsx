@@ -41,6 +41,8 @@ type Incident = {
 }
 type IncidentView = { incident: Incident; latestJob?: Job; lastReport?: Job }
 type Health = { investigator_mode: string }
+type DetectorScore = { detector: string; score: number; threshold: number; anomalous: boolean }
+type ScorePoint = { score: number; threshold: number }
 
 const categoryNames = ['payments', 'orders', 'account', 'delivery'] as const
 const scenarioNames: Record<string, string> = {
@@ -59,6 +61,57 @@ function formatTime(value?: string | null) {
     timeZone: 'UTC', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
   }) + ' UTC'
 }
+const detectorNames: Record<string, string> = {
+  standardized_residual: 'Z-score', cusum: 'CUSUM',
+  gamma_poisson_bayes_factor: 'Bayes factor', poisson_llr: 'Poisson rate check',
+  negative_binomial_llr: 'Negative-binomial rate check',
+}
+
+function retainMonitorEvent(event: StreamEvent) {
+  if (['window_observation', 'anomaly_alert', 'replay_progress', 'detector_baseline_ready', 'detector_baseline_status'].includes(event.event_type)) return true
+  if (event.event_type === 'window_score') return event.payload.calibration !== true
+  return event.event_type === 'ticket_created' && event.payload.replay_phase === 'stream'
+}
+
+function formatFactor(logValue: number) {
+  const power = logValue / Math.LN10
+  if (!Number.isFinite(power)) return '—'
+  if (power >= 6) return `10^${power.toFixed(1)}×`
+  return `${(10 ** power).toPrecision(3)}×`
+}
+
+function Sparkline({ points }: { points: ScorePoint[] }) {
+  if (!points.length) return <span className="score-spark-empty">Waiting for first window</span>
+  const values = points.slice(-144).map(({ score, threshold }) => {
+    const safeThreshold = Math.max(Math.abs(threshold), 1e-9)
+    return score / safeThreshold
+  })
+  const width = 112, height = 25, pad = 2
+  const coords = values.map((value, index) => {
+    const x = values.length <= 1 ? width : pad + index * (width - pad * 2) / (values.length - 1)
+    const clipped = Math.max(-0.2, Math.min(1.5, value))
+    const y = height - pad - ((clipped + 0.2) / 1.7) * (height - pad * 2)
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
+  const cutoffY = height - pad - ((1 + 0.2) / 1.7) * (height - pad * 2)
+  return <svg className="score-sparkline" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Recent score history; horizontal line is the alert cutoff">
+    <line x1="0" x2={width} y1={cutoffY} y2={cutoffY} className="score-spark-threshold" />
+    {values.length > 1 && <polyline points={coords} className="score-spark-path" />}
+    <circle cx={coords.split(' ').at(-1)?.split(',')[0]} cy={coords.split(' ').at(-1)?.split(',')[1]} r="2" className="score-spark-current" />
+  </svg>
+}
+
+function formatReplayClock(value?: string | null) {
+  if (!value) return 'Waiting for stream'
+  const date = new Date(value)
+  const day = Math.floor((date.getTime() - Date.UTC(2026, 0, 1)) / 86_400_000) + 1
+  const time = date.toLocaleTimeString('en-GB', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
+  return `Day ${day} · ${time} UTC`
+}
+
+function windowStartAt(index: number) {
+  return new Date(Date.UTC(2026, 0, 1) + index * 30 * 60_000).toISOString()
+}
 
 async function jsonRequest<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...init })
@@ -75,20 +128,21 @@ export default function EventDrivenMonitor() {
   const [events, setEvents] = useState<StreamEvent[]>([])
   const [incidents, setIncidents] = useState<IncidentView[]>([])
   const [health, setHealth] = useState<Health | null>(null)
-  const [scenario, setScenario] = useState('payment_issue')
   const [arrivalModel, setArrivalModel] = useState('poisson')
-  const [seed, setSeed] = useState(42)
-  const [speed, setSpeed] = useState('normal')
   const [mode, setMode] = useState<'automatic' | 'manual'>('automatic')
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     try { return localStorage.getItem('signalroom-theme') === 'light' ? 'light' : 'dark' } catch { return 'dark' }
   })
   const [busy, setBusy] = useState(false)
+  const [controlBusy, setControlBusy] = useState(false)
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState('')
   const lastSequence = useRef(0)
+  const startupTask = useRef<Promise<void> | null>(null)
   const runRef = useRef<Run | null>(null)
   const eventsRef = useRef<StreamEvent[]>([])
+  const pendingEvents = useRef<StreamEvent[]>([])
+  const eventFlushFrame = useRef<number | null>(null)
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -103,36 +157,46 @@ export default function EventDrivenMonitor() {
     let cursor = 0
     while (true) {
       const page = await jsonRequest<StreamEvent[]>(`/api/runs/${encodeURIComponent(runId)}/events?after_sequence=${cursor}&limit=2000`)
-      restored.push(...page)
+      restored.push(...page.filter(retainMonitorEvent))
+      if (page.length) cursor = page[page.length - 1].sequence
       if (page.length < 2000) break
-      cursor = page[page.length - 1].sequence
     }
-    lastSequence.current = restored.at(-1)?.sequence ?? 0
+    lastSequence.current = cursor || 0
     setRun(savedRun)
     setEvents(restored)
     setMode(savedRun.config.investigation_mode === 'manual' ? 'manual' : 'automatic')
-    setScenario(savedRun.scenario)
-    setSeed(savedRun.seed)
     setArrivalModel(savedRun.arrival_model)
     setError('')
   }, [])
 
   useEffect(() => {
-    let active = true
-    Promise.all([
-      jsonRequest<Run[]>('/api/runs?limit=20'),
-      jsonRequest<Health>('/api/health'),
-    ]).then(async ([recent, currentHealth]) => {
-      if (!active) return
-      setRuns(recent)
-      setHealth(currentHealth)
-      const requestedRun = new URLSearchParams(window.location.search).get('run')
-      const initial = recent.find((item) => item.run_id === requestedRun) ?? recent[0]
-      if (initial) await loadRun(initial.run_id)
-    }).catch((issue) => {
-      if (active) setError(issue instanceof Error ? issue.message : 'Could not restore the latest replay.')
-    })
-    return () => { active = false }
+    if (!startupTask.current) {
+      startupTask.current = (async () => {
+        const [recent, currentHealth] = await Promise.all([
+          jsonRequest<Run[]>('/api/runs?limit=20'),
+          jsonRequest<Health>('/api/health'),
+        ])
+        setRuns(recent)
+        setHealth(currentHealth)
+        const requestedRun = new URLSearchParams(window.location.search).get('run')
+        const selected = requestedRun && recent.find((item) => item.run_id === requestedRun)
+        if (selected) {
+          await loadRun(selected.run_id)
+          return
+        }
+
+        // A monitor page reload starts a new replay. Stop any prior live replay
+        // owned by this still-running API before creating the fresh one.
+        const activeRuns = recent.filter((item) => Number(item.config.monitor_history_windows ?? 0) > 0
+          && ['preparing', 'running', 'queued', 'paused', 'stopping'].includes(item.status))
+        await Promise.all(activeRuns.map((item) => jsonRequest(
+          `/api/runs/${encodeURIComponent(item.run_id)}/controls/stop`, { method: 'POST' },
+        ).catch(() => undefined)))
+        await startReplay()
+      })().catch((issue) => {
+        setError(issue instanceof Error ? issue.message : 'Could not start a fresh replay.')
+      })
+    }
   }, [loadRun])
 
   useEffect(() => {
@@ -145,14 +209,27 @@ export default function EventDrivenMonitor() {
         const event = JSON.parse(message.data) as StreamEvent
         if (event.sequence <= lastSequence.current) return
         lastSequence.current = event.sequence
-        setEvents((current) => [...current, event])
+        if (!retainMonitorEvent(event)) return
+        pendingEvents.current.push(event)
+        if (eventFlushFrame.current === null) {
+          eventFlushFrame.current = window.requestAnimationFrame(() => {
+            const batch = pendingEvents.current.splice(0)
+            eventFlushFrame.current = null
+            if (batch.length) setEvents((current) => [...current, ...batch])
+          })
+        }
       } catch { setError('The event stream returned an unreadable update.') }
     }
-    return () => { stream.close(); setConnected(false) }
+    return () => {
+      stream.close(); setConnected(false)
+      if (eventFlushFrame.current !== null) window.cancelAnimationFrame(eventFlushFrame.current)
+      eventFlushFrame.current = null
+      pendingEvents.current = []
+    }
   }, [run?.run_id])
 
   useEffect(() => {
-    if (!run || !['running', 'queued', 'paused', 'stopping'].includes(run.status)) return
+    if (!run || !['preparing', 'running', 'queued', 'paused', 'stopping'].includes(run.status)) return
     const timer = window.setInterval(() => {
       jsonRequest<Run>(`/api/runs/${encodeURIComponent(run.run_id)}`).then(setRun).catch(() => undefined)
     }, 1000)
@@ -187,19 +264,69 @@ export default function EventDrivenMonitor() {
 
   const observations = useMemo(() => events.filter((item) => item.event_type === 'window_observation'), [events])
   const latestObservation = observations.at(-1)
-  const latestScore = events.filter((item) => item.event_type === 'window_score').at(-1)
-  const counts = (latestObservation?.payload.category_counts ?? {}) as Record<string, number>
-  const scores = (latestScore?.payload.scores_by_category ?? {}) as Record<string, { expected?: number; alerted?: boolean }>
+  const scoreEvents = useMemo(() => events.filter((item) => item.event_type === 'window_score'), [events])
+  const latestScore = scoreEvents.at(-1)
+  const scores = (latestScore?.payload.scores_by_category ?? {}) as Record<string, { expected?: number; alerted?: boolean; scores?: DetectorScore[] }>
+  const baselineEvent = events.filter((item) => item.event_type === 'detector_baseline_ready' || item.event_type === 'detector_baseline_status').at(-1)
+  const baseline = baselineEvent?.payload
+  const baselineCategories = (baseline?.categories ?? {}) as Record<string, { expected_count?: number | null; thresholds?: Record<string, number> }>
+  const scoreHistory = useMemo(() => {
+    const result: Record<string, Record<string, ScorePoint[]>> = Object.fromEntries(categoryNames.map((category) => [category, {}]))
+    for (const event of scoreEvents) {
+      const byCategory = event.payload.scores_by_category ?? {}
+      for (const category of categoryNames) {
+        for (const score of (byCategory[category]?.scores ?? []) as DetectorScore[]) {
+          if (!['standardized_residual', 'cusum', 'gamma_poisson_bayes_factor'].includes(score.detector)) continue
+          result[category][score.detector] ??= []
+          result[category][score.detector].push({ score: Number(score.score), threshold: Number(score.threshold) })
+        }
+      }
+    }
+    return result
+  }, [scoreEvents])
   const alertEvents = useMemo(() => events.filter((item) => item.event_type === 'anomaly_alert'), [events])
+  const latestProgress = events.filter((item) => item.event_type === 'replay_progress').at(-1)
+  const liveWeek = Number(run?.config.monitor_history_windows ?? 0) > 0
+  const historyWindows = Number(run?.config.monitor_history_windows ?? 192)
+  const latestCompletedIndex = Number(latestObservation?.payload.window_index ?? historyWindows - 1)
+  const currentWindowIndex = liveWeek
+    ? (run?.status === 'completed' ? latestCompletedIndex : Number(latestProgress?.payload.current_window_index ?? historyWindows))
+    : Number(latestObservation?.payload.window_index ?? -1) + 1
+  const liveCounts = useMemo(() => {
+    const result: Record<string, number> = Object.fromEntries(categoryNames.map((category) => [category, 0]))
+    if (!liveWeek) return result
+    for (const event of events) {
+      if (event.event_type !== 'ticket_created' || event.payload.replay_phase !== 'stream'
+          || Number(event.payload.window_index) !== currentWindowIndex) continue
+      const category = String(event.payload.category ?? '')
+      if (category in result) result[category] += 1
+    }
+    return result
+  }, [events, liveWeek, currentWindowIndex])
+  const displayCounts = liveWeek && run?.status !== 'completed'
+    ? liveCounts : (latestObservation?.payload.category_counts ?? {}) as Record<string, number>
+  const alertingCategories = new Set(incidents.filter(({ incident }) => incident.status === 'active').map(({ incident }) => incident.category))
+  const ticketSample = useMemo(() => events.filter((event) => event.event_type === 'ticket_created'
+    && event.payload.replay_phase === 'stream').slice(-8).reverse(), [events])
+  const streamCompletedWindows = liveWeek
+    ? Math.max(0, Number(latestObservation?.payload.window_index ?? historyWindows - 1) - historyWindows + 1)
+    : observations.length
   const currentRunMode = run?.config.investigation_mode === 'manual' ? 'manual' : 'automatic'
-  const statusLabel = !run ? 'Ready to replay' : run.status === 'running' ? 'Running' : run.status === 'completed' ? 'Replay complete' : run.status
+  const statusLabel = !run ? 'Ready to replay' : run.status === 'preparing' ? 'Preparing baseline'
+    : run.status === 'running' ? 'Running' : run.status === 'completed' ? 'Replay complete' : run.status
+  const runIsActive = Boolean(run && ['preparing', 'running', 'paused', 'stopping'].includes(run.status))
+  const countsHeading = liveWeek
+    ? run?.status === 'completed'
+      ? `Last window · ${formatReplayClock(latestObservation?.payload.window_start)} – ${formatReplayClock(latestObservation?.payload.window_end)}`
+      : `Day ${Math.floor(currentWindowIndex / 48) + 1} · ${formatTime(windowStartAt(currentWindowIndex))} – ${formatTime(new Date(Date.parse(windowStartAt(currentWindowIndex)) + 30 * 60_000).toISOString())}`
+    : latestObservation ? `Last window completed: ${formatTime(latestObservation.payload.window_end)}` : 'Waiting for the first completed window'
 
-  async function startReplay() {
+  async function startReplay(seedOverride?: number) {
     if (busy) return
-    setBusy(true); setError(''); setEvents([]); setIncidents([]); lastSequence.current = 0
+    setBusy(true); setError(''); setEvents([]); pendingEvents.current = []; setIncidents([]); lastSequence.current = 0
     try {
       const next = await jsonRequest<Run>('/api/runs', {
-        method: 'POST', body: JSON.stringify({ scenario, arrival_model: arrivalModel, seed, speed, investigation_mode: mode }),
+        method: 'POST', body: JSON.stringify({ randomized_week: true, seed: seedOverride, arrival_model: arrivalModel, investigation_mode: mode }),
       })
       setRun(next)
       setRuns((existing) => [next, ...existing.filter((item) => item.run_id !== next.run_id)].slice(0, 20))
@@ -210,11 +337,19 @@ export default function EventDrivenMonitor() {
   }
 
   async function controlReplay(action: 'pause' | 'resume' | 'step' | 'stop') {
-    if (!run) return
+    if (!run || controlBusy) return
+    setControlBusy(true)
     try {
       await jsonRequest(`/api/runs/${encodeURIComponent(run.run_id)}/controls/${action}`, { method: 'POST' })
       setRun(await jsonRequest<Run>(`/api/runs/${encodeURIComponent(run.run_id)}`))
-    } catch (issue) { setError(issue instanceof Error ? issue.message : 'Could not control the replay.') }
+    } catch (issue) {
+      const message = issue instanceof Error ? issue.message : 'Could not control the replay.'
+      if (message === 'Unknown run') {
+        setRun(null)
+        await startReplay()
+      } else setError(message)
+    }
+    finally { setControlBusy(false) }
   }
 
   async function investigate(incident: Incident) {
@@ -257,48 +392,93 @@ export default function EventDrivenMonitor() {
     <div className="monitor-shell"><section className="monitor-main">
       <div className="monitor-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> MONITORING / TICKET COUNTS</div><h1>Live monitor</h1>
         <p className="page-subtitle">Synthetic data · detector watches ticket counts; the investigator follows emitted alerts.</p></div>
-        <div className="replay-status"><span className={`status-dot ${run?.status ?? 'ready'}`} />Synthetic replay · {statusLabel}<small>{run ? `${observations.length} windows completed` : 'No replay started'}</small></div></div>
+        <div className="replay-status"><span className={`status-dot ${run?.status ?? 'ready'}`} />Synthetic replay · {statusLabel}<small>{run ? (liveWeek ? `${streamCompletedWindows}/144 stream windows · ${formatReplayClock(latestProgress?.payload.simulated_at ?? latestProgress?.simulated_at)}` : `${observations.length} windows completed`) : 'No replay started'}</small></div></div>
       {error && <div className="error-banner"><span>!</span>{error}<button onClick={() => setError('')}>Dismiss</button></div>}
 
       <details className="replay-setup" open={!run}>
         <summary>{run ? 'Replay settings' : 'Start a synthetic replay'}</summary>
         <div className="replay-fields">
-          <label className="field"><span>Scenario</span><select value={scenario} onChange={(event) => setScenario(event.target.value)} disabled={run?.status === 'running'}>{Object.entries(scenarioNames).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
           <label className="field"><span>Ticket variation</span><select value={arrivalModel} onChange={(event) => setArrivalModel(event.target.value)}><option value="poisson">Baseline</option><option value="negative_binomial">Higher variation</option></select></label>
-          <label className="field"><span>Seed</span><input type="number" value={seed} onChange={(event) => setSeed(Number(event.target.value))} /></label>
-          <label className="field"><span>Playback</span><select value={speed} onChange={(event) => setSpeed(event.target.value)}><option value="slow">Slow</option><option value="normal">Normal</option><option value="fast">Fast</option></select></label>
           <label className="field"><span>Investigation</span><select value={mode} onChange={(event) => setMode(event.target.value as 'automatic' | 'manual')}><option value="automatic">Automatic</option><option value="manual">Manual</option></select></label>
-          <button className="primary-button" onClick={() => void startReplay()} disabled={busy || run?.status === 'running'}>{busy ? 'Starting…' : run ? 'Start new replay' : 'Start replay'}</button>
+          <button className="primary-button" onClick={() => void startReplay()} disabled={busy || runIsActive}>{busy ? 'Preparing…' : run ? 'Start new replay' : 'Start replay'}</button>
         </div>
-        <p className="replay-note">{mode === 'automatic' ? `Automatic investigations use ${health?.investigator_mode === 'offline_demo' ? 'the offline demo investigator' : 'the configured investigator'}; OpenAI investigations may use credits.` : 'Manual mode records alerts and waits for you to start each investigation.'}</p>
+        <p className="replay-note">A fixed four-day history prepares the baseline. Three seeded days stream in about two minutes. {mode === 'automatic' ? `Automatic investigations use ${health?.investigator_mode === 'offline_demo' ? 'the offline demo investigator' : 'the configured investigator'}; OpenAI investigations may use credits.` : 'Manual mode records alerts and waits for you to start each investigation.'}</p>
       </details>
 
-      {run && <div className="replay-toolbar"><span>Run <code>{run.run_id.slice(0, 8).toUpperCase()}</code> · {scenarioNames[run.scenario] ?? run.scenario} · seed {run.seed} · {currentRunMode} investigation</span>
-        <div>{run.status === 'running' && <button onClick={() => void controlReplay('pause')}>Pause</button>}{run.status === 'paused' && <><button onClick={() => void controlReplay('resume')}>Resume</button><button onClick={() => void controlReplay('step')}>Step window</button></>}{['running', 'paused'].includes(run.status) && <button onClick={() => void controlReplay('stop')}>Stop</button>}</div></div>}
+      {run && <div className="replay-toolbar"><span>{liveWeek ? 'Seven-day seeded replay' : scenarioNames[run.scenario] ?? run.scenario} · seed {run.seed} · {currentRunMode} investigation</span>
+        <div>{run.status === 'running' && <button disabled={controlBusy} onClick={() => void controlReplay('pause')}>Pause</button>}{run.status === 'paused' && <><button disabled={controlBusy} onClick={() => void controlReplay('resume')}>Resume</button><button disabled={controlBusy} onClick={() => void controlReplay('step')}>Step window</button></>}{['running', 'paused'].includes(run.status) && <button disabled={controlBusy} onClick={() => void controlReplay('stop')}>Stop</button>}{liveWeek && ['completed', 'stopped'].includes(run.status) && <button onClick={() => void startReplay(run.seed)} disabled={busy}>Replay this seed</button>}</div></div>}
+      {run && liveWeek && <div className="replay-progress" role="progressbar" aria-valuenow={Math.round(Number(latestProgress?.payload.progress ?? 0) * 100)} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${Math.round(Number(latestProgress?.payload.progress ?? 0) * 100)}%` }} /></div>}
 
       <section className="counts-panel panel" aria-label="Latest category ticket counts">
-        <div className="counts-heading"><div><div className="section-kicker">TICKET COUNTS — LAST 30 MINUTES</div><h2>{latestObservation ? `Last window completed: ${formatTime(latestObservation.payload.window_end)}` : 'Waiting for the first completed window'}</h2></div><span>{run ? `${observations.length} windows` : 'No replay'}</span></div>
-        <div className="count-table"><div className="count-row count-header"><span>Category</span><span>Tickets</span><span>Usual</span><span>Status</span></div>
+        <div className="counts-heading"><div><div className="section-kicker">{liveWeek && run?.status !== 'completed' ? 'LIVE WINDOW — TICKETS SO FAR' : liveWeek ? 'LAST COMPLETED WINDOW' : 'TICKET COUNTS — LAST 30 MINUTES'}</div><h2>{countsHeading}</h2></div><span>{run ? (liveWeek ? `${streamCompletedWindows}/144 windows streamed` : `${observations.length} windows`) : 'No replay'}</span></div>
+        {liveWeek && <p className="counts-context">{baseline?.baseline_ready
+          ? `Usual counts and alert cutoffs learned from ${Number(baseline.warmup_windows ?? historyWindows)} earlier windows. Scores update when each 30-minute window closes.`
+          : 'Preparing the usual counts and alert cutoffs from earlier windows.'}</p>}
+        <div className="count-table"><div className="count-row count-header"><span>Category</span><span>Tickets now</span><span>Usual / 30 min</span><span>Z-score</span><span>CUSUM</span><span>Bayes factor</span><span>Status</span></div>
           {categoryNames.map((category) => {
-            const raised = scores[category]?.alerted === true
-            const expected = scores[category]?.expected
-            return <div className={`count-row ${raised ? 'count-alert' : ''}`} key={category}><strong>{category}</strong><b>{latestObservation ? Number(counts[category] ?? 0) : '—'}</b><span>{expected == null || !Number.isFinite(Number(expected)) || Number(expected) <= 0 ? 'warming up' : Number(expected).toFixed(1)}</span><span className={raised ? 'count-status-alert' : 'count-status-normal'}>{!latestObservation ? 'Waiting' : raised ? 'ALERT' : 'Normal'}</span></div>
+            const raised = alertingCategories.has(category) || scores[category]?.alerted === true
+            const expected = baselineCategories[category]?.expected_count ?? scores[category]?.expected
+            const hasCount = liveWeek ? run?.status !== 'preparing' && currentWindowIndex >= historyWindows : Boolean(latestObservation)
+            const rowStatus = raised ? 'ALERTING' : run?.status === 'preparing' || !baseline?.baseline_ready ? 'Preparing' : run?.status === 'paused' ? 'Paused' : liveWeek && run?.status === 'running' ? 'Watching' : latestObservation ? 'Normal' : 'Waiting'
+            const latestScores = scores[category]?.scores ?? []
+            const metricCell = (detector: string, formatter: (value: number) => string = (value) => value.toFixed(2)) => {
+              const value = latestScores.find((item) => item.detector === detector)
+              const points = scoreHistory[category]?.[detector] ?? []
+              const thresholdKey = detector === 'standardized_residual' ? 'z_score'
+                : detector === 'cusum' ? 'cusum' : 'log_bayes_factor'
+              const baselineCutoff = baselineCategories[category]?.thresholds?.[thresholdKey]
+              if (!value) return <div className="score-cell" key={detector}>
+                <span className="score-value">{baseline?.baseline_ready ? 'Waiting' : '—'}</span>
+                {baselineCutoff != null && <small>cutoff {formatter(Number(baselineCutoff))}</small>}
+                <Sparkline points={points} />
+              </div>
+              return <div className={`score-cell ${value.anomalous ? 'score-over-limit' : ''}`} key={detector}>
+                <span className="score-value">{formatter(Number(value.score))}</span><small>cutoff {formatter(Number(value.threshold))}</small>
+                <Sparkline points={points} />
+              </div>
+            }
+            return <div className={`count-row ${raised ? 'count-alert' : ''}`} key={category}>
+              <strong>{category}</strong><b>{hasCount ? Number(displayCounts[category] ?? 0) : '—'}</b>
+              <span>{expected == null || !Number.isFinite(Number(expected)) ? 'preparing' : Number(expected).toFixed(1)}</span>
+              {metricCell('standardized_residual')}{metricCell('cusum')}
+              {metricCell('gamma_poisson_bayes_factor', formatFactor)}
+              <span className={raised ? 'count-status-alert' : 'count-status-normal'}>{rowStatus}</span>
+            </div>
           })}
         </div>
+        {liveWeek && <p className="score-legend">Scores compare each completed window with its cutoff. The sparkline shows recent history; the dashed line is the cutoff.</p>}
       </section>
+
+      {run && liveWeek && <section className="ticket-feed panel" aria-label="Recent arriving ticket sample">
+        <div className="panel-heading"><div><div className="section-kicker">INCOMING TICKETS</div><h2>Recent arrivals <span>sample · totals include every ticket</span></h2></div><span className="record-count">{ticketSample.length} shown</span></div>
+        <div className="ticket-feed-list" aria-live="polite">
+          {ticketSample.length === 0 && <p className="ticket-feed-empty">{run.status === 'completed' ? 'Replay complete. No tickets were generated.' : 'Waiting for tickets from Day 5...'}</p>}
+          {ticketSample.map((ticket) => <article className="ticket-feed-item" key={ticket.evidence_id}>
+            <time>{formatReplayClock(ticket.simulated_at)}</time><strong>{String(ticket.payload.category ?? 'Ticket')}</strong>
+            <div><b>{String(ticket.payload.title ?? 'Customer contact')}</b><p>{String(ticket.payload.body ?? '')}</p></div>
+          </article>)}
+        </div>
+      </section>}
 
       <section className="incident-stream" aria-label="Alert and investigation updates">
         <div className="section-kicker">ALERTS AND INVESTIGATIONS</div>
         {!run && <p className="stream-empty">Start a replay to watch ticket counts and automatic investigations.</p>}
-        {run && incidents.length === 0 && <p className="stream-empty">No alert episodes yet. The detector is watching each category.</p>}
+        {run && incidents.length === 0 && <p className="stream-empty">{run.status === 'completed' ? 'Replay complete · no alert episodes were emitted.' : 'No alert episodes yet. The detector is watching each completed window.'}</p>}
         {incidents.map(({ incident, latestJob, lastReport }) => {
           const totals = episodeNumbers(incident)
+          const episode = incident.episode
+          const triggerNames = [...new Set(alertEvents.filter((item) => item.payload.category === incident.category
+            && Number(item.payload.window_index) >= Number(episode.start_window ?? 0)
+            && Number(item.payload.window_index) <= Number(episode.latest_window ?? Number.MAX_SAFE_INTEGER))
+            .flatMap((item) => (item.payload.detectors_triggered ?? []) as string[]))]
+          const additionalChecks = triggerNames.filter((name) => ['poisson_llr', 'negative_binomial_llr'].includes(name))
           const report = lastReport?.report
           const evidenceMap = new Map((report?.evidence ?? []).map((item) => [item.evidence_id, item]))
           return <article className={`incident-card ${incident.status === 'active' ? 'is-alerting' : 'is-ended'}`} key={incident.incident_id}>
             <header className="incident-card-heading"><div><div className="section-kicker">{incident.status === 'active' ? 'NEW ALERT' : 'ALERT EPISODE ENDED'} — {incident.category.toUpperCase()}</div>
               <h2>Episode began {formatTime(incident.opened_at)}</h2><p>{totals.windows} alert {totals.windows === 1 ? 'window' : 'windows'} · {totals.tickets} tickets vs {totals.expected.toFixed(1)} expected</p></div>
               <span className={`incident-state ${incident.status}`}>{incident.status === 'active' ? 'Alerting' : 'Ended'}</span></header>
+            {additionalChecks.length > 0 && <details className="alert-detector-details"><summary>Alert details</summary><p>Additional rate checks crossed their cutoffs: {additionalChecks.map((name) => detectorNames[name] ?? name).join(', ')}.</p></details>}
             <div className="investigation-state" aria-live="polite">
               {latestJob?.status === 'queued' && <><strong>Investigation queued</strong><span>Waiting for the investigator to start.</span></>}
               {latestJob?.status === 'running' && <><strong>Investigation started automatically</strong><span>Comparing tickets, service logs, changes, and operating guides…</span><span>Evidence available through {formatTime(latestJob.cutoff)}</span></>}
@@ -327,7 +507,7 @@ export default function EventDrivenMonitor() {
         })}
       </section>
 
-      {run && <details className="replay-history"><summary>Earlier replays ({runs.filter((item) => item.run_id !== run.run_id).length})</summary>{runs.filter((item) => item.run_id !== run.run_id).map((item) => <button key={item.run_id} onClick={() => void setReplay(item.run_id)} disabled={busy}><strong>{scenarioNames[item.scenario] ?? item.scenario}</strong><span>{formatTime(item.created_at)} · {item.status} · seed {item.seed}</span></button>)}</details>}
+      {run && <details className="replay-history"><summary>Earlier replays ({runs.filter((item) => item.run_id !== run.run_id).length})</summary>{runs.filter((item) => item.run_id !== run.run_id).map((item) => <button key={item.run_id} onClick={() => void setReplay(item.run_id)} disabled={busy}><strong>{Number(item.config.monitor_history_windows ?? 0) > 0 ? 'Seven-day seeded replay' : scenarioNames[item.scenario] ?? item.scenario}</strong><span>{formatTime(item.created_at)} · {item.status} · seed {item.seed}</span></button>)}</details>}
       <footer className="monitor-footer">Synthetic data only · Ticket counts trigger alerts; evidence supports or limits the explanation.</footer>
     </section></div>
   </main>

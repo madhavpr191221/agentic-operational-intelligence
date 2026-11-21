@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import math
 import random
+import secrets
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -14,11 +15,95 @@ from agentic_ops.domain import CATEGORIES, SimulationConfig
 WINDOW_MINUTES = 30
 SIMULATION_START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 PAYMENT_INCIDENT_FAILURE_PROBABILITY = 0.26
+MILD_PAYMENT_FAILURE_PROBABILITY = 0.08
 INCIDENT_CATEGORY = {
     "payment_issue": "payments",
     "orders_queue_backlog": "orders",
     "delivery_carrier_degradation": "delivery",
 }
+
+
+@dataclass(frozen=True)
+class ReplayProfile:
+    seed: int
+    severity: str
+    incident_start_window: int | None
+
+
+# Fixed, reviewable demo pool. The common four-day baseline is generated from
+# a separate fixed seed; these seeds control only the streamed three days.
+LIVE_REPLAY_PROFILES = (
+    ReplayProfile(2101, "none", None),
+    ReplayProfile(2102, "none", None),
+    ReplayProfile(2103, "none", None),
+    ReplayProfile(2104, "none", None),
+    ReplayProfile(2201, "mild", 204),
+    ReplayProfile(2202, "mild", 252),
+    ReplayProfile(2203, "mild", 300),
+    ReplayProfile(2301, "severe", 216),
+    ReplayProfile(2302, "severe", 264),
+    ReplayProfile(2303, "severe", 312),
+)
+LIVE_REPLAY_BASELINE_SEED = 20260401
+
+
+def choose_live_replay_profile() -> ReplayProfile:
+    """Choose uniformly from the fixed demo pool, with replacement."""
+    return secrets.choice(LIVE_REPLAY_PROFILES)
+
+
+def generate_live_week(config: SimulationConfig) -> list[GeneratedWindow]:
+    """Prepare fixed four-day history and one seeded three-day stream in memory."""
+    history_count = config.monitor_history_windows
+    if history_count <= 0 or history_count >= config.window_count:
+        raise ValueError("A live-week replay requires a history prefix shorter than the full run")
+    if config.calibration_windows != history_count:
+        raise ValueError("Live-week calibration must cover the fixed history prefix")
+
+    history_config = replace(
+        config,
+        scenario="healthy",
+        seed=LIVE_REPLAY_BASELINE_SEED,
+        window_count=history_count,
+        calibration_windows=max(1, history_count - 1),
+        monitor_history_windows=0,
+        playback_duration_seconds=0.0,
+        incident_start_window=None,
+        incident_severity="none",
+    )
+    history = list(generate_run(history_config))
+
+    stream_config = replace(
+        config,
+        scenario="healthy" if config.incident_severity == "none" else "payment_issue",
+        monitor_history_windows=0,
+        playback_duration_seconds=0.0,
+    )
+    all_stream_windows = list(generate_run(stream_config))
+    combined = history + all_stream_windows[history_count:]
+
+    # A few generated records describe follow-up updates that occur after the
+    # window in which their parent issue was created. Bucket by event time so
+    # the replay clock never publishes a future-dated record early.
+    event_buckets: list[list[GeneratedEvent]] = [[] for _ in combined]
+    for window in combined:
+        for event in window.events:
+            event_time = datetime.fromisoformat(event.simulated_at.replace("Z", "+00:00"))
+            offset = (event_time - SIMULATION_START).total_seconds()
+            target_index = max(0, min(len(combined) - 1, int(offset // (WINDOW_MINUTES * 60))))
+            event_buckets[target_index].append(event)
+
+    return [
+        GeneratedWindow(
+            index=window.index,
+            start=window.start,
+            end=window.end,
+            ticket_count=window.ticket_count,
+            category_counts=window.category_counts,
+            events=sorted(event_buckets[window.index], key=lambda event: event.simulated_at),
+        )
+        for window in combined
+    ]
 
 
 @dataclass
@@ -69,7 +154,7 @@ def _iso(value: datetime) -> str:
 
 
 def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -> Iterator[GeneratedWindow]:
-    """Generate 72 simulated hours in 30-minute windows.
+    """Generate seeded ticket and evidence events in 30-minute windows.
 
     The first day is a baseline. Incident scenarios plant a late increase in one
     category, with corresponding but independently generated text and service
@@ -79,6 +164,10 @@ def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -
         raise ValueError("window_count must be at least 4")
     if config.calibration_windows < 1 or config.calibration_windows >= config.window_count:
         raise ValueError("calibration_windows must be between 1 and window_count - 1")
+    if config.incident_duration_windows < 1:
+        raise ValueError("incident_duration_windows must be positive")
+    if config.incident_start_window is not None and not 0 <= config.incident_start_window < config.window_count:
+        raise ValueError("incident_start_window must be within the generated run")
     if not 0.0 <= config.contact_probability_per_failure <= 1.0:
         raise ValueError("contact_probability_per_failure must be between 0 and 1")
     if len(config.baseline_category_means) != len(CATEGORIES) or any(
@@ -93,8 +182,14 @@ def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -
     # the seeded count process or its detector inputs.
     message_rng = random.Random(config.seed ^ 0x5A17C9E3)
     start = SIMULATION_START
-    issue_window = min(config.calibration_windows, config.window_count // 3)
+    issue_window = (config.incident_start_window if config.incident_start_window is not None
+                    else min(config.calibration_windows, config.window_count // 3))
     resolved_window = min(issue_window + 12, config.window_count - 1)
+    incident_start = (config.incident_start_window if config.incident_start_window is not None
+                      else max(0, config.window_count - 4))
+    incident_end_window = min(config.window_count, incident_start + config.incident_duration_windows)
+    def incident_active(window_index: int) -> bool:
+        return incident_start <= window_index < incident_end_window
     scenario_category = INCIDENT_CATEGORY.get(config.scenario)
     issue_key = {
         "payment_issue": "PAY-204", "orders_queue_backlog": "ORD-318",
@@ -129,7 +224,9 @@ def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -
                 payload={"issue_key": issue_key, "title": issue_title, "status": "investigating",
                          "service": issue_service, "update": "Owner is collecting time-aligned diagnostics."},
             ))
-        if scenario_category and index == max(issue_window, config.window_count - 5):
+        distractor_window = (max(issue_window - 1, 0) if config.incident_start_window is not None
+                             else max(issue_window, config.window_count - 5))
+        if scenario_category and index == distractor_window:
             # A temporally nearby but unrelated change is a deliberate distractor.
             events.append(GeneratedEvent(
                 simulated_at=_iso(window_start - timedelta(minutes=15)), source="change_log", event_type="change_record",
@@ -169,8 +266,10 @@ def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -
 
         attempts = _poisson(rng, config.payment_attempts_per_window)
         failure_probability = 0.012
-        if config.scenario == "payment_issue" and index >= config.window_count - 4:
-            failure_probability = PAYMENT_INCIDENT_FAILURE_PROBABILITY
+        if config.scenario == "payment_issue" and incident_active(index):
+            failure_probability = (MILD_PAYMENT_FAILURE_PROBABILITY
+                                   if config.incident_severity == "mild"
+                                   else PAYMENT_INCIDENT_FAILURE_PROBABILITY)
         failed_attempts = _binomial(rng, attempts, failure_probability)
 
         if config.scenario == "unrelated_issue" and index >= config.window_count - 4:
@@ -223,7 +322,7 @@ def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -
 
         means = dict(zip(CATEGORIES, config.baseline_category_means, strict=True))
         incident_addition = 0.0
-        if scenario_category and index >= config.window_count - 4:
+        if scenario_category and incident_active(index):
             incident_addition = (failed_attempts * config.contact_probability_per_failure
                                  if scenario_category == "payments" else 22.0)
         if config.arrival_model == "negative_binomial":

@@ -6,17 +6,13 @@ Python backend code lives in `src/agentic_ops/`; tests are in `tests/`. The Reac
 
 ## Build, Test, and Development Commands
 
-From the repository root, sync dependencies with `uv sync --locked --extra rag-gpu`. Check GPU/model availability with `uv run python scripts/check_gpu.py`; generate and index the local archive with `uv run python scripts/generate_search_corpus.py --seed 42` and `uv run python scripts/build_search_index.py`. The first model use downloads the embedding and reranking models from Hugging Face. Evaluate retrieval with `uv run python scripts/evaluate_search.py`. Then start the API with `uv run python -m uvicorn agentic_ops.api:app --app-dir src --host 127.0.0.1 --port 8000`. In a second terminal, run `Set-Location web`, `npm ci` (first install), then `npm run dev -- --host 127.0.0.1`; open `http://127.0.0.1:5173/`. Keep both servers running; Vite proxies API requests to port 8000. Set `UV_CACHE_DIR` to a writable user cache directory if uv's default cache path is unusable. The backend reads only `OPENAI_API_KEY` from the ignored root `.env` when an investigation is requested; use `AGENT_MODE=mock` only for an offline deterministic demo.
+From the repository root, start both local services with `.\scripts\dev.ps1`; use `.\scripts\dev.ps1 -Stop` to stop them. Add `-Mock` for an offline demo or `-OpenBrowser` to open the UI automatically. The launcher checks ports, installs locked dependencies if missing, writes logs under ignored `.data/dev/`, and returns to the PowerShell prompt after both services are ready. For individual service debugging, sync dependencies with `uv sync --locked --extra rag-gpu`, then start the API with `uv run python -m uvicorn agentic_ops.api:app --app-dir src --host 127.0.0.1 --port 8000`. Start the web UI from `web/` with `npm ci` and `npm run dev -- --host 127.0.0.1`. Vite proxies API requests to port 8000. Set `UV_CACHE_DIR` to a writable user cache directory if uv's default cache path is unusable. The backend reads only `OPENAI_API_KEY` from the ignored root `.env` when an investigation is requested.
 
-Run one API instance without automatic reload. Stop it with Ctrl+C before restarting after backend edits. If its terminal is unavailable, stop the API listener with:
-
-```powershell
-Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue |
-    Select-Object -ExpandProperty OwningProcess -Unique |
-    ForEach-Object { Stop-Process -Id $_ -Force }
-```
+Run one API instance without automatic reload. Stop and restart it with the launcher after backend edits. If you started services manually, use Ctrl+C in their terminals and inspect port ownership before terminating any process.
 
 For the event-driven prototype, choose Automatic or Manual investigation mode when starting each replay; Automatic is the default. Automatic mode investigates episode openings, relevant service or issue changes, and a final episode-ending update when it adds a newer evidence cutoff. The worker uses the OpenAI investigator by default and requires `OPENAI_API_KEY`; set `AGENT_MODE=mock` for offline reports. Automatic live investigations use API credits. The incident queue and detector checkpoints are persisted; replay workers do not resume after an API process restart.
+
+The current monitor UI is `web/src/EventDrivenMonitor.tsx`. It replays a seeded seven-day synthetic timeline: four fixed history days warm the detector, then three days of ticket and evidence events are released gradually over about two wall-clock minutes. Keep future replay events out of the live store until their simulated timestamps arrive. Update per-category counts for every released ticket, show only a small rolling ticket sample, and score only complete 30-minute windows through the existing count-only detector. Pause must freeze simulated time; Step completes one window and pauses. Replay completion means the finite source ended, not that the service recovered. This is not a live external connector. Keep README instructions aligned and label synthetic replay as synthetic.
 
 Use port `5173` for the UI. Verify the selected port is free before restarting; avoid terminating unrelated project processes. Saved investigation URLs reopen reports without another OpenAI call.
 

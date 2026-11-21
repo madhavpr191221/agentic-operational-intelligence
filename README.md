@@ -1,10 +1,10 @@
 # Agentic Operational Intelligence
 
-A local, fictional operations-intelligence demo that detects category-specific support-ticket spikes and investigates them with evidence from synthetic issues, product logs, tickets, and changes. Detector scores identify unusual behavior; they do not establish causality. One OpenAI Agents SDK investigator adaptively uses read-only tools; a constrained report-composition step checks candidate explanations against returned evidence, cites only valid evidence handles, and may abstain when evidence is insufficient.
+A local, fictional operations-intelligence demo that replays ticket activity, detects category-specific spikes, and investigates emitted alert episodes using synthetic issues, product logs, tickets, and changes. Detector scores identify unusual behavior; they do not establish causality. The OpenAI Agents SDK investigator adaptively uses read-only tools; a constrained report-composition step checks candidate explanations against returned evidence, cites only valid evidence handles, and may abstain when evidence is insufficient.
 
 ## What the demo includes
 
-- A seeded 72-hour simulator for payment authorization, order-queue, and carrier-service incidents, plus healthy, unrelated-change, and resolved-issue controls.
+- Seeded synthetic ticket and service activity for payment authorization, order-queue, and carrier-service incidents, plus healthy and distractor controls. The live monitor uses its own ten-seed replay pool.
 - Poisson and negative-binomial ticket arrivals, scored with likelihood ratios, standardized residuals, upward CUSUM, and a Gamma–Poisson Bayes factor.
 - Synthetic, read-only evidence tools and an automatic investigation for each new alert episode, with a manual follow-up action in the incident inbox.
 - Six grouped investigator tools search evidence, inspect service health, analyze customer themes, compare incident context, build a timeline, and retrieve advisory runbook guidance.
@@ -15,14 +15,15 @@ A local, fictional operations-intelligence demo that detects category-specific s
 - Four fictional runbooks have editable Markdown sources and searchable text PDFs. Service and dependency guidance, historical postmortems, and deployment guidance are additional searchable Markdown documents. Citations identify the source path and page or section.
 - Evidence-grounded fictional runbook suggestions include a verification check and never execute operational changes.
 - Empirically calibrated category-specific detector thresholds and held-out detector evaluation.
-- Four category charts, consecutive alert episodes, selectable focus windows, event timelines, category reports, and light/dark themes.
-- Joint focus-window analysis in chronological order: T-2, T-1, T, and T+1 when available, with exact UTC intervals, ticket counts, service errors, and scoped citations.
+- A live synthetic monitor that releases seeded ticket events over time, updates all category counts within each 30-minute window, and shows a small rolling sample of arriving tickets.
+- Automatic investigation by default, with a manual mode that records alerts and waits for an operator to start each investigation.
+- A seven-day seeded replay: four days of fixed history warm the existing detector, then three days stream over about two minutes. The stream can be paused, resumed, stepped by one 30-minute window, or replayed with the same seed. It ends explicitly and does not loop; it is synthetic replay, not a live external ticket connection.
 
 All incident, ticket, service, issue, and change records are fictional and generated from a reproducible seed. No external incident data is needed.
 
 See [Alert-to-RCA integration](docs/design/alert-retrieval-rca-integration.md) for the component boundaries, tool contract, evidence-time rules, evaluation plan, and an interview-ready architecture explanation.
 
-The [continuous detection and incident investigation architecture](docs/design/event-driven-incident-system.md) is implemented as a local prototype: count alerts are saved to a SQLite outbox, opened episodes create investigation jobs, and the incident inbox shows reports and retrieved passages. It uses one API process and one background worker; replay restart, automatic evidence-triggered follow-ups, and production-grade job recovery remain future work.
+The [continuous detection and incident investigation architecture](docs/design/event-driven-incident-system.md) is implemented as a local prototype: count alerts are saved to a SQLite outbox, opened episodes create investigation jobs, and the monitor shows reports and retrieved passages. It uses one API process and one background worker. The live monitor releases only events whose simulated time has arrived; real connectors, replay recovery after an API restart, automatic evidence-triggered follow-ups, and production-grade job recovery remain future work.
 
 ### Synthetic evidence corpus and retrieval
 
@@ -44,7 +45,7 @@ uv run python scripts/build_runbooks.py
 
 ## Detection and investigation are separate
 
-The statistical detector receives only timestamped per-category ticket counts. It emits versioned scores and alert events; it does not read ticket text, product logs, issues, or changes. The investigator runs only after an operator requests an investigation. It reads the persisted alert and uses evidence tools, but cannot import or recompute detector logic. This keeps alert quality measurable independently from the quality of the RCA explanation.
+The statistical detector receives only timestamped per-category ticket counts. It emits scores and alert events; it does not read ticket text, product logs, issues, or changes. In automatic mode, an opened episode creates a persisted investigation job. In manual mode, the alert waits for an operator to start that job. The investigator reads the persisted alert and uses evidence tools, but cannot import or recompute detector logic. This keeps alert quality measurable independently from the quality of the RCA explanation.
 
 ## Requirements
 
@@ -78,67 +79,60 @@ The model files are downloaded on first use and cached by Hugging Face. The inde
 
 If you install or repair the GPU search dependencies while the API is already running, restart the API. A saved report keeps the search result from when it was created; start a new investigation to search the archive again.
 
-In the first PowerShell terminal, from the repository root, start the API on `127.0.0.1:8000`:
+For live investigations, copy `.env.example` to `.env` and set `OPENAI_API_KEY` in `.env`. OpenAI investigation is the default; the launcher clears any inherited mock-mode setting unless you pass `-Mock`.
 
-```powershell
-uv run python -m uvicorn agentic_ops.api:app --app-dir src --host 127.0.0.1 --port 8000
-```
-
-For live investigations, copy `.env.example` to `.env` and set `OPENAI_API_KEY` in `.env`. OpenAI investigation is the default; clear any mock-mode setting in the current PowerShell session before starting the backend:
-
-```powershell
-Remove-Item Env:AGENT_MODE -ErrorAction SilentlyContinue
-```
-
-The backend reads the key only when an investigation is requested. You may set `OPENAI_MODEL` in the shell to choose a model. Keep `.env` private; it is ignored by Git.
-
-For offline mock investigations, set the mode before starting the backend:
-
-```powershell
-$env:AGENT_MODE = "mock"
-uv run python -m uvicorn agentic_ops.api:app --app-dir src
-```
+The backend reads the key when an investigation job runs. Automatic mode is the default, so starting a replay that emits an alert can use OpenAI API credits without another click. Choose Manual mode in replay settings to decide when to start each investigation. You may set `OPENAI_MODEL` in the shell to choose a model. Keep `.env` private; it is ignored by Git.
 
 The live workflow uses one OpenAI Agents SDK agent with a bounded adaptive tool loop, followed by one structured report-composition pass with no tools. The offline mock demonstrates the same report and activity UI without calling a model.
 
-In a second PowerShell terminal, start the web interface. Vite serves it at `http://127.0.0.1:5173/` and proxies `/api` requests to the backend on port `8000`:
+### Start the app with one command
 
 ```powershell
-Set-Location web
-npm ci
-npm run dev -- --host 127.0.0.1
+.\scripts\dev.ps1
 ```
 
-Open `http://127.0.0.1:5173/`. Keep both terminals running while using the app. Choose a scenario and start a run. The **LOCAL SIMULATOR** label describes the synthetic event data; the investigator calls OpenAI when you submit an investigation.
+Or double-click `scripts/start-dev.cmd` in File Explorer; it opens the PowerShell launcher for you.
 
-1. Compare the category charts and select an episode in **Ticket-volume alerts**. Each episode groups consecutive 30-minute alerts. Select one episode per category.
-2. Choose a focus window; the strongest signal is selected by default. The investigator compares T-2, T-1, T, and T+1 when available, using the full episode and earlier records as context. At the end of a completed run, selecting W143 includes W141, W142, and W143.
-3. Click **Investigate episode**. The report lists exact UTC intervals and counts, a joint finding, supporting evidence, remaining questions, and suggested next steps. Each interval includes its start and excludes its end.
-4. Open evidence records to inspect customer messages and service events. Recommendations are advisory; the app does not execute operational changes.
+This starts the API and web interface in the background, checks that both are ready, then returns to the PowerShell prompt. Open `http://127.0.0.1:5173/` in your browser. Add `-OpenBrowser` if you want the script to open it automatically. If Python or web dependencies are missing, the script installs them from the lockfiles. Logs are saved under `.data/dev/`.
 
-If a saved report predates the focus-window summary, refresh the page after the updated API is running. The API can rebuild the summary from stored run events; you do not need to rerun the simulation or investigation.
+Stop both services with:
 
-Investigation links include `?run=<run-id>&investigation=<investigation-id>#investigation-report`. Bookmark the URL after starting an investigation to reopen its saved report and charts. Opening a saved report does not call OpenAI again.
+```powershell
+.\scripts\dev.ps1 -Stop
+```
 
-Run one API instance at a time. The command above runs without automatic reload. After backend edits, stop it with Ctrl+C and start it again. On Windows, forcibly closing a reloading server can leave its child worker running with older code; starting another server can then serve inconsistent report formats on the same port.
+Or double-click `scripts/stop-dev.cmd`.
+
+The stop command stops only recognized services on ports `8000` and `5173`; it leaves other processes alone. For an offline demo without model calls, use `.\scripts\dev.ps1 -Mock`. The normal launch uses OpenAI by default and reads `OPENAI_API_KEY` from `.env` when an investigation runs. Automatic investigation can use API credits; choose Manual mode in replay settings to decide when to start each investigation. Keep `.env` private; it is ignored by Git.
+
+If PowerShell blocks running local scripts, launch it with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1
+```
+
+Use the same command with `-Stop` to stop both services when the default policy blocks local scripts.
+
+1. Opening the main UI starts a fresh replay automatically and stops any previous active replay. A saved URL with a `?run=...` parameter opens that specific replay. The replay uses a seed from the fixed ten-seed pool. Automatic investigation is the default and can use OpenAI credits when an alert opens; choose Manual in Replay settings before starting another replay if you want to trigger investigations yourself.
+2. Days 1-4 load as fixed history to establish the detector baseline. Days 5-7 stream in about two minutes. Watch all four category counts update as tickets arrive; only completed 30-minute windows are scored, using the existing count-only detector. A scrolling sample shows recent ticket wording, while the counts include every ticket.
+3. When a category alerts, an episode appears under **Alerts and investigations**. In Automatic mode, the investigation starts on its own. The card shows whether it is queued, running, complete, or needs attention.
+4. Read the report summary, then expand **Evidence and retrieved guides** and **What remains uncertain** to inspect its evidence and limits. Recommendations are advisory; the app does not execute operational changes.
+5. Pause, resume, step, or stop a replay using its controls. Starting a new replay keeps earlier runs available in replay history.
+
+Pause freezes simulated time; **Step window** releases the rest of the current window, scores it, then pauses again. **Replay complete** means the finite synthetic source ended; it does not mean the service recovered. The completed replay remains visible until you reload or start another one. This demo does not monitor a live ticket source. Replay workers do not resume after an API process restart.
+
+Run one API instance at a time. After backend edits, stop and restart it with `.\scripts\dev.ps1 -Stop` and `.\scripts\dev.ps1`.
 
 ### Stop or restart an existing server
 
-Press **Ctrl+C** in the terminal running the server. If that terminal is unavailable, stop the process listening on the API port:
+Use the launcher to stop both services:
 
 ```powershell
-Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue |
-    Select-Object -ExpandProperty OwningProcess -Unique |
-    ForEach-Object { Stop-Process -Id $_ -Force }
+.\scripts\dev.ps1 -Stop
 ```
 
-To stop the UI instead, use `5173` in place of `8000`. Check the port before restarting; no output means no listener was found:
+The launcher checks port ownership and leaves unrecognized processes running. If you started either service manually, stop it with Ctrl+C in its terminal.
 
-```powershell
-Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
-```
-
-Restart with the API or UI command above. These commands stop the listener on the selected port; confirm it belongs to this app if you use that port for other projects.
 
 If uv cannot initialize its default cache on Windows, use the ignored project-local cache before running uv:
 

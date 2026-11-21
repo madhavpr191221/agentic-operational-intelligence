@@ -15,6 +15,7 @@ from agentic_ops.domain import SimulationConfig
 from agentic_ops.detector_host import list_incidents
 from agentic_ops.incident_worker import schedule_job
 from agentic_ops.service import OperationsRuntime
+from agentic_ops.simulation import LIVE_REPLAY_PROFILES, choose_live_replay_profile
 
 Speed = Literal["slow", "normal", "fast"]
 InvestigationMode = Literal["automatic", "manual"]
@@ -23,10 +24,11 @@ InvestigationMode = Literal["automatic", "manual"]
 class RunRequest(BaseModel):
     scenario: Literal["payment_issue", "healthy", "unrelated_issue", "resolved_issue",
                       "orders_queue_backlog", "delivery_carrier_degradation"] = "payment_issue"
-    seed: int = 42
+    seed: int | None = None
     arrival_model: Literal["poisson", "negative_binomial"] = "poisson"
     speed: Speed = "normal"
     investigation_mode: InvestigationMode = "automatic"
+    randomized_week: bool = False
 
 
 class EpisodeSelection(BaseModel):
@@ -131,9 +133,30 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
 
     @app.post("/api/runs", status_code=202)
     def start_run(request: RunRequest) -> dict:
-        delay = {"slow": 0.45, "normal": 0.12, "fast": 0.025}[request.speed]
-        config = SimulationConfig(scenario=request.scenario, seed=request.seed,
-                                  arrival_model=request.arrival_model, tick_delay_seconds=delay)
+        if request.randomized_week:
+            if request.seed is None:
+                profile = choose_live_replay_profile()
+            else:
+                profile = next((item for item in LIVE_REPLAY_PROFILES if item.seed == request.seed), None)
+                if profile is None:
+                    raise HTTPException(status_code=422, detail="Seed is not in the live replay seed pool")
+            config = SimulationConfig(
+                scenario="healthy" if profile.severity == "none" else "payment_issue",
+                seed=profile.seed,
+                arrival_model=request.arrival_model,
+                tick_delay_seconds=0.0,
+                window_count=336,
+                calibration_windows=192,
+                monitor_history_windows=192,
+                playback_duration_seconds=120.0,
+                incident_start_window=profile.incident_start_window,
+                incident_duration_windows=4,
+                incident_severity=profile.severity,
+            )
+        else:
+            delay = {"slow": 0.45, "normal": 0.12, "fast": 0.025}[request.speed]
+            config = SimulationConfig(scenario=request.scenario, seed=request.seed if request.seed is not None else 42,
+                                      arrival_model=request.arrival_model, tick_delay_seconds=delay)
         return app.state.runtime.start_run(config, request.investigation_mode)
 
     @app.get("/api/runs/{run_id}")

@@ -2,11 +2,14 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agentic_ops.agent import MockInvestigator
 from agentic_ops.domain import RCAReport, SimulationConfig
 from agentic_ops.detector_host import list_incidents
 from agentic_ops.service import OperationsRuntime
+from agentic_ops.service import RunControl
+from agentic_ops.simulation import GeneratedWindow
 from agentic_ops.store import EventStore
 
 
@@ -44,6 +47,41 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.runtime.store.get_truth(run["run_id"])["cause"], "payment_authorization_failure")
         public_records = self.runtime.evidence.search_issues(run["run_id"])
         self.assertNotIn("payment_authorization_failure", repr(public_records))
+
+    def test_live_replay_emits_warmed_baseline_snapshot(self):
+        counts = {"payments": 5, "orders": 8, "account": 4, "delivery": 6}
+        windows = [
+            GeneratedWindow(0, "2026-01-01T00:00:00Z", "2026-01-01T00:30:00Z", 23, counts, []),
+            GeneratedWindow(1, "2026-01-01T00:30:00Z", "2026-01-01T01:00:00Z", 0,
+                            {category: 0 for category in counts}, []),
+        ]
+        config = SimulationConfig(window_count=2, calibration_windows=1,
+                                  monitor_history_windows=1, playback_duration_seconds=0.001)
+        run = self.runtime.store.create_run("healthy", 42, "poisson", {})
+        with patch("agentic_ops.service.generate_live_week", return_value=windows):
+            from agentic_ops.detection import CategoryDetectorSuite
+            from agentic_ops.detector_host import DetectorHost
+            host = DetectorHost(self.runtime.store, run,
+                                CategoryDetectorSuite("poisson", 1, ("payments", "orders", "account", "delivery")))
+            self.runtime._run_live_week(run, config, RunControl(), host, automatic=False)
+        snapshot = next(event for event in self.runtime.store.list_events(run, limit=100)
+                        if event["event_type"] == "detector_baseline_ready")
+        self.assertTrue(snapshot["payload"]["baseline_ready"])
+        self.assertEqual(snapshot["payload"]["categories"]["payments"]["expected_count"], 5)
+        self.assertEqual(self.runtime.store.get_run(run)["status"], "completed")
+
+    def test_new_runtime_stops_persisted_replay_from_previous_process(self):
+        run_id = self.runtime.store.create_run("healthy", 42, "poisson", {
+            "monitor_history_windows": 192,
+        })
+        self.runtime.store.set_run_status(run_id, "paused")
+        restarted_runtime = OperationsRuntime(self.runtime.store, MockInvestigator())
+        try:
+            recovered = self.runtime.store.get_run(run_id)
+            self.assertEqual(recovered["status"], "stopped")
+            self.assertIn("application restart", recovered["error"])
+        finally:
+            restarted_runtime.incident_worker.stop()
 
     def test_operator_investigation_returns_cited_report(self):
         config = SimulationConfig(seed=4, window_count=52, calibration_windows=20,

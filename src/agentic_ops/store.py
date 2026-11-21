@@ -139,6 +139,15 @@ class EventStore:
         with self._connection() as connection:
             connection.execute("UPDATE runs SET status=?, error=? WHERE run_id=?", (status, error, run_id))
 
+    def stop_interrupted_runs(self) -> int:
+        """Mark nonterminal replays from a prior process as stopped."""
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE runs SET status='stopped', error='Replay interrupted by application restart.' "
+                "WHERE status IN ('queued','preparing','running','paused','stopping')"
+            )
+        return cursor.rowcount
+
     def add_truth(self, run_id: str, truth: dict[str, Any]) -> None:
         """Evaluator-only data. No evidence tool reads this table."""
         with self._connection() as connection:

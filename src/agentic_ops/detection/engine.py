@@ -229,6 +229,31 @@ class CategoryDetectorSuite:
             categories=categories,
         )
 
+    def monitoring_snapshot(self) -> dict:
+        """Expose count-only baseline and display cutoffs without changing scoring."""
+        ready = all(len(suite.baseline) >= suite.config.warmup_windows
+                    for suite in self.suites.values())
+        categories = {}
+        for category, suite in self.suites.items():
+            config = suite.config
+            categories[category] = {
+                "expected_count": suite.expected if ready else None,
+                "baseline_windows": len(suite.baseline),
+                "thresholds": {
+                    "z_score": config.residual_threshold,
+                    "cusum": config.cusum_threshold,
+                    # This value stays in log space, matching the detector score.
+                    "log_bayes_factor": config.log_bayes_factor_threshold,
+                },
+            }
+        return {
+            "schema_version": 1,
+            "baseline_ready": ready,
+            "baseline_mode": next(iter(self.suites.values())).config.baseline_mode,
+            "warmup_windows": max(suite.config.warmup_windows for suite in self.suites.values()),
+            "categories": categories,
+        }
+
     def checkpoint(self) -> dict:
         """Return the count-only state required to resume scoring."""
         return {

@@ -27,6 +27,13 @@ class SimulationConfig:
     payment_attempts_per_window: float = 120.0
     contact_probability_per_failure: float = 0.85
     negative_binomial_shape: float = 4.0
+    # Optional seeded live-week replay controls. Zero playback duration keeps
+    # the original window-at-a-time replay behavior for existing callers.
+    monitor_history_windows: int = 0
+    playback_duration_seconds: float = 0.0
+    incident_start_window: int | None = None
+    incident_duration_windows: int = 4
+    incident_severity: Literal["none", "mild", "severe"] = "severe"
 
 
 @dataclass

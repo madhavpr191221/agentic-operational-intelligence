@@ -145,6 +145,10 @@ class DetectorHost:
         finally:
             db.close()
 
+    def monitoring_snapshot(self) -> dict[str, Any]:
+        """Return the count-only baseline and display limits for the monitor."""
+        return self.suite.monitoring_snapshot()
+
     def pending_events(self) -> list[dict[str, Any]]:
         """Read undelivered events in window and insertion order."""
         with self.store._connection() as db:

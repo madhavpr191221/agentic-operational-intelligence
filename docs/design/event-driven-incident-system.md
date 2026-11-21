@@ -1,12 +1,14 @@
 # Proposed architecture: continuous detection and incident investigation
 
-Status: **Design for review. Not implemented.**
+Status: **Architecture proposal with a local event-driven prototype implemented.**
 
-Date: 2026-11-21. Baseline reviewed: `feat/alert-retrieval-rca-integration`, commit `abfc431`.
+Date: 2026-11-21. Prototype baseline: `design/event-driven-incident-architecture`, commit `09d64b1`.
 
 This document proposes the next architecture. The [current integration design](alert-retrieval-rca-integration.md) and [retrieval design](local-hybrid-rag.md) describe the existing implementation. Names, schemas, scheduling rules, and limits below are proposed contracts, not available commands or endpoints.
 
 Suggested first pass: sections 1-4 for the overview, diagrams, and component map; 9-12 for alert handling and investigation; 14 for the operator experience; and 17-18 for implementation order and decisions. The remaining sections specify the integrity and recovery rules needed to make that behavior dependable.
+
+The current application is a finite, seeded seven-day replay. Four fixed history days warm the detector; the last three days of ticket and evidence events are released gradually over about two wall-clock minutes. The monitor updates category counts as tickets arrive, shows a small rolling ticket sample, and sends only completed 30-minute count observations to the existing detector. Emitted episodes automatically queue investigations by default; Manual mode waits for an operator request. This remains synthetic replay, not data from a live external source. The architecture below describes the intended system beyond this local prototype; the implementation table distinguishes what exists from what remains proposed.
 
 ## 1. Product and operating model
 

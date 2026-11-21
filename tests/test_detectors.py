@@ -99,6 +99,23 @@ class DetectorTests(unittest.TestCase):
             suite.update(CountObservation(1, "2026-01-01T00:30:00Z", "2026-01-01T01:00:00Z",
                                           {"payments": 5, "customer_text": 2}))
 
+    def test_monitoring_snapshot_reports_baseline_and_cutoffs_only_when_ready(self):
+        suite = CategoryDetectorSuite("poisson", warmup_windows=2,
+                                      categories=("payments", "orders", "account", "delivery"))
+        snapshot = suite.monitoring_snapshot()
+        self.assertFalse(snapshot["baseline_ready"])
+        self.assertIsNone(snapshot["categories"]["payments"]["expected_count"])
+        for index in range(2):
+            suite.update(CountObservation(index, f"start-{index}", f"end-{index}", {
+                "payments": 5, "orders": 8, "account": 4, "delivery": 6,
+            }))
+        snapshot = suite.monitoring_snapshot()
+        self.assertTrue(snapshot["baseline_ready"])
+        self.assertEqual(snapshot["warmup_windows"], 2)
+        self.assertEqual(snapshot["categories"]["payments"]["expected_count"], 5)
+        self.assertEqual(set(snapshot["categories"]["payments"]["thresholds"]),
+                         {"z_score", "cusum", "log_bayes_factor"})
+
     def test_count_observation_rejects_negative_values_and_extra_evidence(self):
         with self.assertRaisesRegex(ValueError, "cannot be negative"):
             CountObservation(0, "start", "end", {"payments": -1})

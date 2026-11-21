@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,7 @@ from agentic_ops.domain import CATEGORIES, SimulationConfig
 from agentic_ops.detector_host import DetectorHost
 from agentic_ops.incident_worker import IncidentWorker
 from agentic_ops.evidence import EvidenceTools
-from agentic_ops.simulation import generate_run
+from agentic_ops.simulation import GeneratedEvent, GeneratedWindow, generate_live_week, generate_run
 from agentic_ops.retrieval import load_knowledge_passages, load_runbook_pages
 from agentic_ops.search_activity import summarize_search_trace
 from agentic_ops.store import EventStore
@@ -45,12 +46,17 @@ class RunControl:
     paused: bool = False
     stopped: bool = False
     step_budget: int = 0
+    pause_started_at: float | None = None
+    paused_seconds: float = 0.0
     thread: threading.Thread | None = None
 
 
 class OperationsRuntime:
     def __init__(self, store: EventStore | None = None, investigator: Investigator | None = None):
         self.store = store or EventStore()
+        # A replay's clock and controls live in this process. Persisted running
+        # rows cannot be resumed safely after a process restart.
+        self.store.stop_interrupted_runs()
         self.evidence = EvidenceTools(self.store)
         # Initialize the additive incident/outbox schema even before a replay exists.
         DetectorHost(self.store, "schema-bootstrap", CategoryDetectorSuite("poisson", 48, CATEGORIES))
@@ -94,10 +100,16 @@ class OperationsRuntime:
             "resolved_issue": "resolved_payment_issue",
             "healthy": "none",
         }
+        has_incident = config.scenario != "healthy"
         truth = {"scenario": config.scenario,
                  "cause": truth_by_scenario.get(config.scenario, "none"),
-                 "issue_opens_at_window": min(config.calibration_windows, config.window_count // 3),
-                 "severe_failure_starts_at_window": config.window_count - 4}
+                 "issue_opens_at_window": ((config.incident_start_window if config.incident_start_window is not None
+                                             else min(config.calibration_windows, config.window_count // 3))
+                                            if has_incident else None),
+                 "severe_failure_starts_at_window": ((config.incident_start_window if config.incident_start_window is not None
+                                                       else config.window_count - 4)
+                                                      if config.incident_severity == "severe" and has_incident else None),
+                 "incident_severity": config.incident_severity}
         self.store.add_truth(run_id, truth)
         start = "2026-01-01T00:00:00Z"
         for page in load_runbook_pages():
@@ -105,10 +117,12 @@ class OperationsRuntime:
         for passage in load_knowledge_passages():
             self.store.add_event(run_id, passage["available_at"], "knowledge_docs",
                                  "document_passage", passage)
-        self.store.set_run_status(run_id, "running")
+        self.store.set_run_status(run_id, "preparing" if config.monitor_history_windows else "running")
         self.store.add_event(run_id, start, "system", "run_started",
                              {"scenario": config.scenario, "seed": config.seed, "arrival_model": config.arrival_model,
-                              "window_count": config.window_count})
+                              "window_count": config.window_count,
+                              "streaming_week": bool(config.monitor_history_windows),
+                              "playback_duration_seconds": config.playback_duration_seconds})
         thread = threading.Thread(target=self._run_simulation, args=(run_id, config, control), daemon=True,
                                   name=f"simulation-{run_id[:8]}")
         control.thread = thread
@@ -123,6 +137,9 @@ class OperationsRuntime:
         try:
             automatic = self._run_investigation_mode(run_id) == "automatic"
             detector_host.deliver_pending(automatic=automatic)
+            if config.monitor_history_windows:
+                self._run_live_week(run_id, config, control, detector_host, automatic)
+                return
             for window in generate_run(config):
                 with control.condition:
                     while control.paused and control.step_budget == 0 and not control.stopped:
@@ -136,73 +153,224 @@ class OperationsRuntime:
                 for generated in window.events:
                     self.store.add_event(run_id, generated.simulated_at, generated.source,
                                          generated.event_type, generated.payload)
-                observation = self.store.add_event(
-                    run_id, window.end, "detector", "window_observation",
-                    {"schema_version": 1, "window_index": window.index,
-                     "window_start": window.start, "window_end": window.end,
-                     "ticket_count": window.ticket_count, "category_counts": window.category_counts},
-                )
-                count_observation = CountObservation(
-                    window_index=window.index,
-                    window_start=window.start,
-                    window_end=window.end,
-                    category_counts=window.category_counts,
-                )
-                detection = detector_host.process(count_observation)
-                score_event = self.store.add_event(
-                    run_id, window.end, "detector", "window_score",
-                    {"schema_version": 1, "window_index": window.index,
-                     "observed": window.ticket_count,
-                     "category_counts": window.category_counts,
-                     "scores_by_category": detection["categories"],
-                     "calibration": window.index < config.calibration_windows,
-                     "observation_evidence_id": observation["evidence_id"],
-                     "detection_result": detection},
-                )
-                transition_by_category = {
-                    event["category"]: event["episode"]
-                    for event in detector_host.pending_events()
-                    if event["window"]["window_index"] == window.index
-                    and event["event_type"] in {"episode_opened", "episode_updated"}
-                }
-                for category, result in detection["categories"].items():
-                    if not result["alerted"]:
-                        continue
-                    scores = result["scores"]
-                    triggered = [score["detector"] for score in scores if score["anomalous"]]
-                    by_detector = {score["detector"]: score for score in scores}
-                    likelihood_name = ("negative_binomial_llr" if config.arrival_model == "negative_binomial"
-                                       else "poisson_llr")
-                    signal = {
-                        "metric": "support_ticket_arrivals", "category": category,
-                        "window_index": window.index, "window_start": window.start,
-                        "window_end": window.end, "window_minutes": 30,
-                        "observed": result["observed"], "expected": result["expected"],
-                        "arrival_model": config.arrival_model,
-                        "scores": {
-                            "z_score": by_detector["standardized_residual"]["score"],
-                            "cusum": by_detector["cusum"]["score"],
-                            "log_likelihood_ratio": by_detector[likelihood_name]["score"],
-                        },
-                    }
-                    self.store.add_event(run_id, window.end, "detector", "anomaly_alert",
-                                         {"schema_version": 1,
-                                          "metric": "support_ticket_arrivals", "category": category,
-                                          "window_index": window.index, "window_start": window.start,
-                                          "window_end": window.end, "ticket_count": result["observed"],
-                                          "expected": result["expected"], "signal": signal,
-                                          "scores": scores,
-                                          "statistical_episode": transition_by_category.get(category),
-                                          "detectors_triggered": triggered,
-                                          "observation_evidence_id": observation["evidence_id"],
-                                          "window_score_evidence_id": score_event["evidence_id"]})
-                # Episode and initial job are created/acknowledged atomically.
-                detector_host.deliver_pending(automatic=automatic)
+                self._process_window(run_id, config, window, detector_host, automatic)
                 if config.tick_delay_seconds > 0:
                     time.sleep(config.tick_delay_seconds)
             self.store.set_run_status(run_id, "completed")
         except Exception as exc:  # keep a visible error state for the local operator
             self.store.set_run_status(run_id, "failed", str(exc))
+
+    def _store_generated_event(self, run_id: str, generated: GeneratedEvent,
+                               replay_phase: str | None = None) -> dict[str, Any]:
+        payload = dict(generated.payload)
+        if replay_phase is not None:
+            payload["replay_phase"] = replay_phase
+        return self.store.add_event(run_id, generated.simulated_at, generated.source,
+                                    generated.event_type, payload)
+
+    def _process_window(self, run_id: str, config: SimulationConfig, window: GeneratedWindow,
+                        detector_host: DetectorHost, automatic: bool) -> None:
+        observation = self.store.add_event(
+            run_id, window.end, "detector", "window_observation",
+            {"schema_version": 1, "window_index": window.index,
+             "window_start": window.start, "window_end": window.end,
+             "ticket_count": window.ticket_count, "category_counts": window.category_counts},
+        )
+        count_observation = CountObservation(
+            window_index=window.index, window_start=window.start, window_end=window.end,
+            category_counts=window.category_counts,
+        )
+        detection = detector_host.process(count_observation)
+        score_event = self.store.add_event(
+            run_id, window.end, "detector", "window_score",
+            {"schema_version": 1, "window_index": window.index,
+             "observed": window.ticket_count, "category_counts": window.category_counts,
+             "scores_by_category": detection["categories"],
+             "calibration": window.index < config.calibration_windows,
+             "observation_evidence_id": observation["evidence_id"],
+             "detection_result": detection},
+        )
+        transition_by_category = {
+            event["category"]: event["episode"]
+            for event in detector_host.pending_events()
+            if event["window"]["window_index"] == window.index
+            and event["event_type"] in {"episode_opened", "episode_updated"}
+        }
+        for category, result in detection["categories"].items():
+            if not result["alerted"]:
+                continue
+            scores = result["scores"]
+            triggered = [score["detector"] for score in scores if score["anomalous"]]
+            by_detector = {score["detector"]: score for score in scores}
+            likelihood_name = ("negative_binomial_llr" if config.arrival_model == "negative_binomial"
+                               else "poisson_llr")
+            signal = {
+                "metric": "support_ticket_arrivals", "category": category,
+                "window_index": window.index, "window_start": window.start,
+                "window_end": window.end, "window_minutes": 30,
+                "observed": result["observed"], "expected": result["expected"],
+                "arrival_model": config.arrival_model,
+                "scores": {
+                    "z_score": by_detector["standardized_residual"]["score"],
+                    "cusum": by_detector["cusum"]["score"],
+                    "log_likelihood_ratio": by_detector[likelihood_name]["score"],
+                },
+            }
+            self.store.add_event(run_id, window.end, "detector", "anomaly_alert",
+                                 {"schema_version": 1, "metric": "support_ticket_arrivals",
+                                  "category": category, "window_index": window.index,
+                                  "window_start": window.start, "window_end": window.end,
+                                  "ticket_count": result["observed"], "expected": result["expected"],
+                                  "signal": signal, "scores": scores,
+                                  "statistical_episode": transition_by_category.get(category),
+                                  "detectors_triggered": triggered,
+                                  "observation_evidence_id": observation["evidence_id"],
+                                  "window_score_evidence_id": score_event["evidence_id"]})
+        detector_host.deliver_pending(automatic=automatic)
+
+    def _run_live_week(self, run_id: str, config: SimulationConfig, control: RunControl,
+                       detector_host: DetectorHost, automatic: bool) -> None:
+        windows = generate_live_week(config)
+        history_end = config.monitor_history_windows
+        history = windows[:history_end]
+        stream = windows[history_end:]
+
+        # History is genuinely in the past at stream start, so it can be loaded
+        # up front and used to warm the existing detector without creating alerts.
+        for window in history:
+            for generated in window.events:
+                self._store_generated_event(run_id, generated, "history")
+            self._process_window(run_id, config, window, detector_host, automatic)
+
+        baseline = detector_host.monitoring_snapshot()
+        self.store.add_event(
+            run_id, history[-1].end if history else "2026-01-01T00:00:00Z",
+            "detector", "detector_baseline_ready" if baseline["baseline_ready"] else "detector_baseline_status",
+            {**baseline, "history_start": history[0].start if history else None,
+             "history_end": history[-1].end if history else None},
+        )
+
+        if not stream:
+            self.store.set_run_status(run_id, "completed")
+            return
+
+        playback_seconds = config.playback_duration_seconds
+        if playback_seconds <= 0:
+            raise ValueError("Live playback duration must be positive")
+        stream_start = datetime.fromisoformat(stream[0].start.replace("Z", "+00:00"))
+        stream_end = datetime.fromisoformat(stream[-1].end.replace("Z", "+00:00"))
+        simulated_span_seconds = (stream_end - stream_start).total_seconds()
+        if simulated_span_seconds <= 0:
+            raise ValueError("Live replay stream must have a positive simulated duration")
+
+        with control.condition:
+            self.store.set_run_status(run_id, "paused" if control.paused else "running")
+        wall_start = time.monotonic()
+        self._emit_replay_progress(run_id, stream_start, history_end,
+                                   {category: 0 for category in CATEGORIES}, 0.0)
+        last_progress = wall_start
+
+        for window in stream:
+            current_counts = {category: 0 for category in CATEGORIES}
+            window_end = datetime.fromisoformat(window.end.replace("Z", "+00:00"))
+            stepped = False
+            for generated in window.events:
+                event_time = datetime.fromisoformat(generated.simulated_at.replace("Z", "+00:00"))
+                target_offset = (event_time - stream_start).total_seconds()
+                target_wall_elapsed = playback_seconds * target_offset / simulated_span_seconds
+                if not stepped:
+                    state, last_progress = self._wait_for_live_time(
+                        control, wall_start, target_wall_elapsed, run_id, stream_start,
+                        simulated_span_seconds, playback_seconds, window.index,
+                        current_counts, last_progress,
+                    )
+                    if state == "stopped":
+                        self.store.set_run_status(run_id, "stopped")
+                        return
+                    if state == "step":
+                        stepped = True
+                        last_progress = time.monotonic()
+                self._store_generated_event(run_id, generated, "stream")
+                if generated.event_type == "ticket_created":
+                    category = str(generated.payload.get("category", ""))
+                    if category in current_counts:
+                        current_counts[category] += 1
+
+            target_offset = (window_end - stream_start).total_seconds()
+            target_wall_elapsed = playback_seconds * target_offset / simulated_span_seconds
+            if not stepped:
+                state, last_progress = self._wait_for_live_time(
+                    control, wall_start, target_wall_elapsed, run_id, stream_start,
+                    simulated_span_seconds, playback_seconds, window.index,
+                    current_counts, last_progress,
+                )
+                if state == "stopped":
+                    self.store.set_run_status(run_id, "stopped")
+                    return
+                if state == "step":
+                    stepped = True
+            if current_counts != window.category_counts:
+                raise RuntimeError(
+                    f"Released ticket counts for window {window.index} do not match the generated count observation"
+                )
+            self._process_window(run_id, config, window, detector_host, automatic)
+            completed = window.index - history_end + 1
+            percent = completed / len(stream)
+            self._emit_replay_progress(run_id, window_end, window.index + 1,
+                                       {category: 0 for category in CATEGORIES}, percent)
+            last_progress = time.monotonic()
+            if stepped:
+                with control.condition:
+                    control.paused = True
+                    if control.pause_started_at is None:
+                        control.pause_started_at = time.monotonic()
+                    self.store.set_run_status(run_id, "paused")
+
+        self._emit_replay_progress(run_id, stream_end, config.window_count,
+                                   {category: 0 for category in CATEGORIES}, 1.0)
+        self.store.set_run_status(run_id, "completed")
+
+    def _wait_for_live_time(self, control: RunControl, wall_start: float, target_elapsed: float,
+                            run_id: str, stream_start: datetime, simulated_span_seconds: float,
+                            playback_seconds: float, window_index: int,
+                            current_counts: dict[str, int],
+                            last_progress: float) -> tuple[str, float]:
+        while True:
+            with control.condition:
+                if control.stopped:
+                    return "stopped", last_progress
+                if control.paused:
+                    if control.step_budget > 0:
+                        control.step_budget -= 1
+                        return "step", last_progress
+                    control.condition.wait(timeout=0.05)
+                    continue
+                now = time.monotonic()
+                elapsed = now - wall_start - control.paused_seconds
+                remaining = target_elapsed - elapsed
+                if remaining <= 0:
+                    return "ready", last_progress
+                control.condition.wait(timeout=min(remaining, 0.05))
+
+            now = time.monotonic()
+            if now - last_progress >= 0.25:
+                elapsed = max(0.0, now - wall_start - control.paused_seconds)
+                fraction = min(1.0, elapsed / playback_seconds)
+                simulated_at = stream_start + timedelta(seconds=simulated_span_seconds * fraction)
+                self._emit_replay_progress(run_id, simulated_at, window_index,
+                                           current_counts, fraction)
+                last_progress = now
+
+    def _emit_replay_progress(self, run_id: str, simulated_at: datetime, current_window_index: int,
+                              current_counts: dict[str, int], progress: float) -> None:
+        self.store.add_event(
+            run_id, simulated_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "replay", "replay_progress",
+            {"simulated_at": simulated_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
+             "current_window_index": current_window_index,
+             "current_window_counts": dict(current_counts),
+             "progress": min(1.0, max(0.0, progress))},
+        )
 
     def _run_investigation_mode(self, run_id: str) -> str:
         run = self.store.get_run(run_id)
@@ -218,19 +386,29 @@ class OperationsRuntime:
             raise ValueError("Run is already terminal")
         with control.condition:
             if action == "pause":
-                control.paused = True
+                if not control.paused:
+                    control.paused = True
+                    control.pause_started_at = time.monotonic()
                 self.store.set_run_status(run_id, "paused")
             elif action == "resume":
+                if control.paused and control.pause_started_at is not None:
+                    control.paused_seconds += time.monotonic() - control.pause_started_at
+                    control.pause_started_at = None
                 control.paused = False
                 self.store.set_run_status(run_id, "running")
                 control.condition.notify_all()
             elif action == "step":
-                control.paused = True
+                if not control.paused:
+                    control.paused = True
+                    control.pause_started_at = time.monotonic()
                 control.step_budget += 1
                 self.store.set_run_status(run_id, "paused")
                 control.condition.notify_all()
             elif action == "stop":
                 control.stopped = True
+                if control.paused and control.pause_started_at is not None:
+                    control.paused_seconds += time.monotonic() - control.pause_started_at
+                    control.pause_started_at = None
                 control.paused = False
                 self.store.set_run_status(run_id, "stopping")
                 control.condition.notify_all()
