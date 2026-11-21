@@ -428,9 +428,3 @@ Stages should remain reviewable. Avoid a single rewrite of detection, retrieval,
 | Remediation | Advice plus verification and provenance | Keeps operational execution outside this project milestone. |
 
 These recommendations are ready for discussion. The follow-up cooldown, evidence-watch period, concurrency and resource ceilings are engineering defaults to validate, not settled product requirements.
-
-## 19. Interview explanation
-
-> I built a system that observes ticket counts and investigates the alert episodes it emits. The statistical detector only sees counts. Its host persists alerts durably, and a coordinator turns new episodes into queued investigations. A worker freezes what was knowable at that point, compares customer and service evidence, searches versioned reference documents with keyword and vector retrieval, and evaluates competing explanations using bounded read-only tools. Every report has source citations, exact time scope, uncertainty, and an advisory next step. Later evidence creates another report revision. Synthetic replay lets me test the whole lifecycle, including duplicate delivery, missing evidence, and worker failures, without relying on private operational data.
-
-Be ready to explain why counts and text follow different paths; why queue batching differs from joint diagnosis; why a first report cannot use a future window; why high retrieval similarity is not causal confidence; why an outbox and idempotent jobs still cannot guarantee exactly-once provider billing; and which parts have been implemented versus remain proposals.
