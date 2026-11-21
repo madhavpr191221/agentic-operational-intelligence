@@ -48,6 +48,7 @@ class EvidenceRef:
     source: str
     observed_at: str
     summary: str
+    available_at: str | None = None
     window_index: int | None = None
     page_number: int | None = None
     source_path: str | None = None

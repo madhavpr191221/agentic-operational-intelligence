@@ -18,7 +18,7 @@ type Run = {
   error?: string | null
 }
 
-type EvidenceItem = { evidence_id: string; source: string; observed_at: string; summary: string; window_index?: number | null; page_number?: number | null; source_path?: string | null; section_title?: string | null }
+type EvidenceItem = { evidence_id: string; source: string; observed_at: string; available_at?: string | null; summary: string; window_index?: number | null; page_number?: number | null; source_path?: string | null; section_title?: string | null }
 type FocusWindow = {
   window_index: number
   available?: boolean
@@ -812,7 +812,7 @@ function App() {
                 { label: 'Within the selected focus groups', records: report.evidence.filter((item) => isEvidenceInFocus(item, episodeReportSummaries)) },
                 { label: 'Additional context outside the selected focus groups', records: report.evidence.filter((item) => !isEvidenceInFocus(item, episodeReportSummaries)) },
               ].filter((group) => group.records.length > 0).map((group) => <section className="all-evidence-group" key={group.label}>
-                <h3>{group.label}</h3><div>{group.records.map((item) => <article key={item.evidence_id}><strong>{evidenceSourceLabels[item.source] ?? 'Evidence record'} · {timeLabel(item.observed_at)}</strong><small>{evidenceSourceDescriptions[item.source] ?? 'Evidence used in this investigation.'}</small><p>{item.summary}</p><details className="technical-details"><summary>Technical details</summary><code>{item.evidence_id}</code></details></article>)}</div>
+                <h3>{group.label}</h3><div>{group.records.map((item) => <article key={item.evidence_id}><strong>{evidenceSourceLabels[item.source] ?? 'Evidence record'} · {timeLabel(item.observed_at)}</strong><small>{evidenceSourceDescriptions[item.source] ?? 'Evidence used in this investigation.'}</small><p>{item.summary}</p><details className="technical-details"><summary>Technical details</summary><code>{item.evidence_id}</code>{item.available_at && item.available_at !== item.observed_at && <small>Available to search · {timeLabel(item.available_at)}</small>}{item.source_path && <small>{item.section_title ? `${item.section_title} · ` : ''}{item.source_path}{item.page_number ? ` · page ${item.page_number}` : ''}</small>}</details></article>)}</div>
               </section>)}
             </details>
             <details className="trace-details"><summary>Technical investigation trace · {report.tool_trace.length} results</summary><div className="trace-list">{report.tool_trace.map((item, index) => <div key={`${item.tool}-${index}`}><code>{item.tool}</code><pre>{JSON.stringify(item.result, null, 2)}</pre></div>)}</div></details>
