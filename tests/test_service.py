@@ -19,7 +19,7 @@ class RuntimeTests(unittest.TestCase):
         self.runtime = OperationsRuntime(EventStore(Path(self.temp.name) / "runtime.sqlite3"), MockInvestigator())
 
     def tearDown(self):
-        self.runtime.incident_worker.stop()
+        self.runtime.stop()
         self.temp.cleanup()
 
     def test_run_emits_scores_alerts_and_keeps_truth_separate(self):
@@ -81,7 +81,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(recovered["status"], "stopped")
             self.assertIn("application restart", recovered["error"])
         finally:
-            restarted_runtime.incident_worker.stop()
+            restarted_runtime.stop()
 
     def test_operator_investigation_returns_cited_report(self):
         config = SimulationConfig(seed=4, window_count=52, calibration_windows=20,

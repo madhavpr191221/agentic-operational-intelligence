@@ -85,6 +85,8 @@ The backend reads the key when an investigation job runs. The demo checks that a
 
 The live workflow uses one OpenAI Agents SDK agent with a bounded adaptive tool loop, followed by one structured report-composition pass with no tools. The offline mock demonstrates the same report and activity UI without calling a model.
 
+Incident attention is separate from detector scoring and investigation: the monitor marks incidents **Immediate**, **Review soon**, or **Monitor** and explains the evidence. Immediate conditions use trusted critical service telemetry or fresh tickets plus independently collected critical telemetry. The exact structured email saved to the SQLite outbox is previewable in the incident card; simulated mode is the default and never sends network email. To opt into SMTP, set `AOI_EMAIL_MODE=smtp` and configure the `AOI_SMTP_*`, `AOI_PRIMARY_EMAIL`, and `AOI_BACKUP_EMAIL` values in `.env`. Set `AOI_APP_URL` to the operator-facing application URL for working incident links (defaults to `http://127.0.0.1:5173`). SMTP server acceptance is recorded as dispatched, not as confirmed delivery. Policy cutoffs in `.env.example` are configurable demo defaults, not validated operational standards.
+
 ### Start the app with one command
 
 ```powershell

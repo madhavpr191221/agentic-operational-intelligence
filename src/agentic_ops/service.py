@@ -21,6 +21,7 @@ from agentic_ops.detection import (
 from agentic_ops.domain import CATEGORIES, SimulationConfig
 from agentic_ops.detector_host import DetectorHost
 from agentic_ops.incident_worker import IncidentWorker
+from agentic_ops.notifications import NotificationCoordinator
 from agentic_ops.evidence import EvidenceTools
 from agentic_ops.simulation import GeneratedEvent, GeneratedWindow, generate_live_week, generate_run
 from agentic_ops.retrieval import load_knowledge_passages, load_runbook_pages
@@ -65,6 +66,23 @@ class OperationsRuntime:
         self._lock = threading.Lock()
         self.incident_worker = IncidentWorker(self.store, self._investigator, self.evidence)
         self.incident_worker.start()
+        self.notifications = NotificationCoordinator(self.store)
+        self.notifications.start()
+
+    def stop(self) -> None:
+        """Stop background workers when the API process shuts down."""
+        with self._lock:
+            controls = list(self._controls.values())
+        for control in controls:
+            with control.condition:
+                control.stopped = True
+                control.paused = False
+                control.condition.notify_all()
+        for control in controls:
+            if control.thread and control.thread.is_alive():
+                control.thread.join(timeout=5)
+        self.notifications.stop()
+        self.incident_worker.stop()
 
     @property
     def investigator_mode(self) -> str:

@@ -25,7 +25,7 @@ class ApiTests(unittest.TestCase):
             self.assertEqual({item["id"] for item in scenarios},
                              {"payment_issue", "healthy", "unrelated_issue", "resolved_issue",
                               "orders_queue_backlog", "delivery_carrier_degradation"})
-            runtime.incident_worker.stop()
+            runtime.stop()
 
     def test_incident_api_exposes_statistical_and_operational_state(self):
         from fastapi.testclient import TestClient
@@ -49,7 +49,41 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(client.get("/api/incidents?stream_id=stream").json()[0]["incident_id"], "incident")
                 self.assertEqual(client.get("/api/incidents/incident/reports/1").json()["report"]["summary"], "saved")
             finally:
-                runtime.incident_worker.stop()
+                runtime.stop()
+
+    def test_notification_inbox_and_acknowledgement_endpoints(self):
+        from fastapi.testclient import TestClient
+        from agentic_ops.api import create_app
+
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = OperationsRuntime(EventStore(Path(directory) / "notifications.sqlite3"), MockInvestigator())
+            try:
+                run_id = runtime.store.create_run("payment_issue", 2, "poisson", {})
+                runtime.store.add_event(run_id, "2026-01-01T10:10:00Z", "product_logs", "service_log_summary",
+                                        {"service": "checkout-payments", "requests": 100, "errors": 20})
+                runtime.store.add_event(run_id, "2026-01-01T10:30:00Z", "detector", "window_observation",
+                                        {"window_index": 1, "window_start": "2026-01-01T10:00:00Z",
+                                         "window_end": "2026-01-01T10:30:00Z"})
+                with runtime.store._connection() as db:
+                    db.execute("INSERT INTO incidents (incident_id,stream_id,category,status,opened_at,latest_window_end,last_event_id,episode_json,operational_status) "
+                               "VALUES (?,?,?,?,?,?,?,?,?)",
+                               ("notification-incident", run_id, "payments", "active", "2026-01-01T10:30:00Z",
+                                "2026-01-01T10:30:00Z", "event", '{"category":"payments","latest_window":1}', "open"))
+                runtime.notifications.evaluate_incidents()
+                client = TestClient(create_app(runtime))
+                inbox = client.get(f"/api/notifications?stream_id={run_id}").json()
+                self.assertEqual(inbox["email_mode"], "simulated")
+                self.assertEqual(inbox["items"][0]["level"], "immediate")
+                email = inbox["items"][0]["outbox"][0]
+                self.assertEqual(email["draft"]["subject"], email["subject"])
+                self.assertEqual(email["draft"]["body"], email["body"])
+                self.assertEqual(email["draft"]["to"], email["recipient"])
+                self.assertEqual(email["delivery_mode"], "simulated")
+                response = client.post(f"/api/notifications/{inbox['items'][0]['notification_id']}/acknowledge")
+                self.assertEqual(response.status_code, 200)
+                self.assertIsNotNone(response.json()["acknowledged_at"])
+            finally:
+                runtime.stop()
 
 
 if __name__ == "__main__":
