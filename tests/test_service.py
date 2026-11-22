@@ -19,7 +19,7 @@ class RuntimeTests(unittest.TestCase):
         self.runtime = OperationsRuntime(EventStore(Path(self.temp.name) / "runtime.sqlite3"), MockInvestigator())
 
     def tearDown(self):
-        self.runtime.incident_worker.stop()
+        self.runtime.stop()
         self.temp.cleanup()
 
     def test_run_emits_scores_alerts_and_keeps_truth_separate(self):
@@ -70,6 +70,22 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(snapshot["payload"]["categories"]["payments"]["expected_count"], 5)
         self.assertEqual(self.runtime.store.get_run(run)["status"], "completed")
 
+        # The next seeded replay should hydrate the four-day-equivalent prefix
+        # from the persistent snapshot and generate only its streamed suffix.
+        second_run = self.runtime.store.create_run("healthy", 42, "poisson", {})
+        second_host = DetectorHost(
+            self.runtime.store, second_run,
+            CategoryDetectorSuite("poisson", 1, ("payments", "orders", "account", "delivery")),
+        )
+        with patch("agentic_ops.service.generate_live_week", side_effect=AssertionError(
+                "cached replay should not regenerate the history prefix")), \
+             patch("agentic_ops.service.generate_live_stream", return_value=[]):
+            self.runtime._run_live_week(second_run, config, RunControl(), second_host, automatic=False)
+        reused = next(event for event in self.runtime.store.list_events(second_run, limit=100)
+                      if event["event_type"] == "detector_baseline_ready")
+        self.assertEqual(reused["payload"]["baseline_cache"], "reused")
+        self.assertEqual(self.runtime.store.get_run(second_run)["status"], "completed")
+
     def test_new_runtime_stops_persisted_replay_from_previous_process(self):
         run_id = self.runtime.store.create_run("healthy", 42, "poisson", {
             "monitor_history_windows": 192,
@@ -81,7 +97,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(recovered["status"], "stopped")
             self.assertIn("application restart", recovered["error"])
         finally:
-            restarted_runtime.incident_worker.stop()
+            restarted_runtime.stop()
 
     def test_operator_investigation_returns_cited_report(self):
         config = SimulationConfig(seed=4, window_count=52, calibration_windows=20,

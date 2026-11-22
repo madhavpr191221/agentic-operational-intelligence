@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from collections.abc import AsyncIterator
 from typing import Literal
@@ -55,8 +56,17 @@ class IncidentInvestigationRequest(BaseModel):
 
 
 def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
-    app = FastAPI(title="Agentic Operational Intelligence", version="0.1.0")
-    app.state.runtime = runtime or OperationsRuntime()
+    selected_runtime = runtime or OperationsRuntime()
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            selected_runtime.stop()
+
+    app = FastAPI(title="Agentic Operational Intelligence", version="0.1.0", lifespan=lifespan)
+    app.state.runtime = selected_runtime
 
     @app.get("/api/health")
     def health() -> dict[str, str | bool]:
@@ -67,6 +77,22 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
     @app.get("/api/incidents")
     def incidents(stream_id: str | None = None) -> list[dict]:
         return list_incidents(app.state.runtime.store, stream_id)
+
+    @app.get("/api/notifications")
+    def notifications(stream_id: str | None = None) -> dict:
+        coordinator = app.state.runtime.notifications
+        return {"email_mode": coordinator.adapter.mode,
+                "acknowledgement_timeout_seconds": coordinator.settings.acknowledgement_timeout_seconds,
+                "items": coordinator.list_assessments(stream_id)}
+
+    @app.post("/api/notifications/{notification_id}/acknowledge")
+    def acknowledge_notification(notification_id: str) -> dict:
+        try:
+            return app.state.runtime.notifications.acknowledge(notification_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/api/investigation-queue")
     def investigation_queue() -> dict:

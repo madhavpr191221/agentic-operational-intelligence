@@ -46,6 +46,7 @@ LIVE_REPLAY_PROFILES = (
     ReplayProfile(2303, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW),
 )
 LIVE_REPLAY_BASELINE_SEED = 20260401
+LIVE_REPLAY_BASELINE_CACHE_VERSION = 1
 
 
 def choose_live_replay_profile(severity: str | None = None) -> ReplayProfile:
@@ -79,24 +80,43 @@ def generate_live_week(config: SimulationConfig) -> list[GeneratedWindow]:
     )
     history = list(generate_run(history_config))
 
+    all_stream_windows = _generate_live_stream_windows(config)
+    combined = history + all_stream_windows[history_count:]
+    return _rebucket_live_events(combined)
+
+
+def generate_live_stream(config: SimulationConfig) -> list[GeneratedWindow]:
+    """Generate only the streamed portion, preserving the seeded day-five data."""
+    history_count = config.monitor_history_windows
+    if history_count <= 0 or history_count >= config.window_count:
+        raise ValueError("A live-week replay requires a history prefix shorter than the full run")
+    if config.calibration_windows != history_count:
+        raise ValueError("Live-week calibration must cover the fixed history prefix")
+    all_stream_windows = _generate_live_stream_windows(config)
+    return _rebucket_live_events(all_stream_windows)[history_count:]
+
+
+def _generate_live_stream_windows(config: SimulationConfig) -> list[GeneratedWindow]:
     stream_config = replace(
         config,
         scenario="healthy" if config.incident_severity == "none" else "payment_issue",
         monitor_history_windows=0,
         playback_duration_seconds=0.0,
     )
-    all_stream_windows = list(generate_run(stream_config))
-    combined = history + all_stream_windows[history_count:]
+    # Generate from window zero so the random stream reaching Day 5 is identical
+    # to generate_live_week; only the fixed history prefix is skipped by the caller.
+    return list(generate_run(stream_config))
 
-    # A few generated records describe follow-up updates that occur after the
-    # window in which their parent issue was created. Bucket by event time so
-    # the replay clock never publishes a future-dated record early.
-    event_buckets: list[list[GeneratedEvent]] = [[] for _ in combined]
-    for window in combined:
+
+def _rebucket_live_events(windows: list[GeneratedWindow]) -> list[GeneratedWindow]:
+    # Some records describe a later update than their parent issue. Bucket by
+    # event time so the replay clock never publishes a future-dated record early.
+    event_buckets: list[list[GeneratedEvent]] = [[] for _ in windows]
+    for window in windows:
         for event in window.events:
             event_time = datetime.fromisoformat(event.simulated_at.replace("Z", "+00:00"))
             offset = (event_time - SIMULATION_START).total_seconds()
-            target_index = max(0, min(len(combined) - 1, int(offset // (WINDOW_MINUTES * 60))))
+            target_index = max(0, min(len(windows) - 1, int(offset // (WINDOW_MINUTES * 60))))
             event_buckets[target_index].append(event)
 
     return [
@@ -108,7 +128,7 @@ def generate_live_week(config: SimulationConfig) -> list[GeneratedWindow]:
             category_counts=window.category_counts,
             events=sorted(event_buckets[window.index], key=lambda event: event.simulated_at),
         )
-        for window in combined
+        for window in windows
     ]
 
 

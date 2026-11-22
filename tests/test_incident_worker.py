@@ -233,4 +233,4 @@ class IncidentWorkerTests(unittest.TestCase):
                 second = schedule_job(runtime.store, initial["incident_id"], "Review", "request-1")
                 self.assertEqual(first["job_id"], second["job_id"])
             finally:
-                runtime.incident_worker.stop()
+                runtime.stop()

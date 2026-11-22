@@ -43,6 +43,22 @@ type Incident = {
   investigations: Job[]
 }
 type IncidentView = { incident: Incident; latestJob?: Job; lastReport?: Job }
+type EmailDraft = {
+  schema_version?: number; recipient_role?: string; to?: string; subject?: string; body?: string
+  priority?: string; category?: string; service?: string; episode_started_at?: string
+  latest_alert_window_end?: string; evidence_cutoff?: string; alert_window_count?: number
+  latest_window_ticket_count?: number | null; peak_window_ticket_count?: number | null
+  rationale?: string; investigation_status?: string; investigation_finding?: string | null
+  uncertainty?: string; requested_response?: string; incident_id?: string; incident_url?: string
+}
+type Attention = {
+  incident_id: string; level: 'immediate' | 'review_soon' | 'monitor'; rationale: string
+  notification_id?: string | null; acknowledgement_deadline?: string | null
+  acknowledged_at?: string | null; acknowledged_by?: string | null; escalation_status?: string | null
+  history?: Array<{event_type: string; occurred_at: string; actor?: string | null; detail: Record<string, unknown>}>
+  outbox?: Array<{recipient_role: string; recipient: string; subject: string; body: string; draft: EmailDraft
+    status: string; delivery_mode: string; attempt_count: number; last_error?: string | null}>
+}
 type Health = { investigator_mode: string; openai_key_configured: boolean }
 type AlertLevel = 'normal' | 'medium' | 'high'
 type DetectorScore = { detector: string; score: number; threshold: number; anomalous: boolean }
@@ -139,6 +155,7 @@ export default function EventDrivenMonitor() {
   const [run, setRun] = useState<Run | null>(null)
   const [events, setEvents] = useState<StreamEvent[]>([])
   const [incidents, setIncidents] = useState<IncidentView[]>([])
+  const [attentionItems, setAttentionItems] = useState<Attention[]>([])
   const [queue, setQueue] = useState<{queued: number; running: number; pending_followups: number; oldest_wait_seconds: number | null} | null>(null)
   const [health, setHealth] = useState<Health | null>(null)
   const [alertLevel, setAlertLevel] = useState<AlertLevel>('high')
@@ -147,8 +164,10 @@ export default function EventDrivenMonitor() {
   })
   const [busy, setBusy] = useState(false)
   const [controlBusy, setControlBusy] = useState(false)
+  const [acknowledgingIds, setAcknowledgingIds] = useState<Set<string>>(new Set())
   const [investigatingIds, setInvestigatingIds] = useState<Set<string>>(new Set())
   const investigationRequests = useRef(new Set<string>())
+  const hashScrollTarget = useRef('')
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState('')
   const lastSequence = useRef(0)
@@ -164,6 +183,14 @@ export default function EventDrivenMonitor() {
   }, [theme])
   useEffect(() => { runRef.current = run }, [run])
   useEffect(() => { eventsRef.current = events }, [events])
+  useEffect(() => {
+    const target = window.location.hash.slice(1)
+    if (!target.startsWith('incident-') || hashScrollTarget.current === target) return
+    const incidentId = target.slice('incident-'.length)
+    if (!incidents.some(({ incident }) => incident.incident_id === incidentId)) return
+    hashScrollTarget.current = target
+    window.requestAnimationFrame(() => document.getElementById(target)?.scrollIntoView({ block: 'start' }))
+  }, [incidents])
 
   const loadRun = useCallback(async (runId: string) => {
     const savedRun = await jsonRequest<Run>(`/api/runs/${encodeURIComponent(runId)}`)
@@ -208,6 +235,7 @@ export default function EventDrivenMonitor() {
         setRun(null)
         setEvents([])
         setIncidents([])
+        setAttentionItems([])
       })().catch((issue) => {
         setError(issue instanceof Error ? issue.message : 'Could not start a fresh replay.')
       })
@@ -255,6 +283,8 @@ export default function EventDrivenMonitor() {
     if (!run) { setIncidents([]); return }
     try {
       const found = await jsonRequest<Incident[]>(`/api/incidents?stream_id=${encodeURIComponent(run.run_id)}`)
+      const attention = await jsonRequest<{email_mode: string; items: Attention[]}>(`/api/notifications?stream_id=${encodeURIComponent(run.run_id)}`)
+      setAttentionItems(attention.items)
       const views = await Promise.all(found.map(async (incident): Promise<IncidentView> => {
         const detail = await jsonRequest<Incident>(`/api/incidents/${encodeURIComponent(incident.incident_id)}`)
         const latestJob = detail.investigations.at(-1)
@@ -270,6 +300,16 @@ export default function EventDrivenMonitor() {
       setIncidents(views)
     } catch (issue) { setError(issue instanceof Error ? issue.message : 'Could not refresh incident updates.') }
   }, [run?.run_id])
+
+  const acknowledge = useCallback(async (item: Attention) => {
+    if (!item.notification_id || acknowledgingIds.has(item.notification_id)) return
+    setAcknowledgingIds((current) => new Set(current).add(item.notification_id!))
+    try {
+      await jsonRequest(`/api/notifications/${encodeURIComponent(item.notification_id)}/acknowledge`, { method: 'POST' })
+      await refreshIncidents()
+    } catch (issue) { setError(issue instanceof Error ? issue.message : 'Could not acknowledge this notification.') }
+    finally { setAcknowledgingIds((current) => { const next = new Set(current); next.delete(item.notification_id!); return next }) }
+  }, [acknowledgingIds, refreshIncidents])
 
   useEffect(() => {
     void refreshIncidents()
@@ -452,7 +492,11 @@ export default function EventDrivenMonitor() {
       <section className="counts-panel panel" aria-label="Latest category ticket counts">
         <div className="counts-heading"><div><div className="section-kicker">{liveWeek && run?.status !== 'completed' ? 'LIVE WINDOW — TICKETS SO FAR' : liveWeek ? 'LAST COMPLETED WINDOW' : 'TICKET COUNTS — LAST 30 MINUTES'}</div><h2>{countsHeading}</h2></div><span>{run ? (liveWeek ? `${streamCompletedWindows}/144 windows streamed` : `${observations.length} windows`) : 'No replay'}</span></div>
         {liveWeek && <p className="counts-context">{baseline?.baseline_ready
-          ? `Usual counts and alert cutoffs learned from ${Number(baseline.warmup_windows ?? historyWindows)} earlier windows. Scores update when each 30-minute window closes.`
+          ? baseline.baseline_cache === 'reused'
+            ? `Saved four-day baseline reused. Scores update when each 30-minute window closes.`
+            : baseline.baseline_cache === 'created'
+              ? `Four-day baseline prepared and saved. Future replays can start directly on Day 5.`
+              : `Usual counts and alert cutoffs learned from ${Number(baseline.warmup_windows ?? historyWindows)} earlier windows. Scores update when each 30-minute window closes.`
           : 'Preparing the usual counts and alert cutoffs from earlier windows.'}</p>}
         <div className="count-table"><div className="count-row count-header"><span>Category</span><span>Tickets now</span><span>Usual / 30 min</span><span>Z-score</span><span>CUSUM</span><span>Bayes factor</span><span>Status</span></div>
           {categoryNames.map((category) => {
@@ -506,6 +550,7 @@ export default function EventDrivenMonitor() {
         {!run && <p className="stream-empty">Start a replay to watch ticket counts and automatic investigations.</p>}
         {run && incidents.length === 0 && <p className="stream-empty">{run.status === 'completed' ? 'Replay complete · no alert episodes were emitted.' : 'No alert episodes yet. The detector is watching each completed window.'}</p>}
         {incidents.map(({ incident, latestJob, lastReport }) => {
+          const attention = attentionItems.find((item) => item.incident_id === incident.incident_id)
           const totals = episodeNumbers(incident)
           const episode = incident.episode
           const triggerNames = [...new Set(alertEvents.filter((item) => item.payload.category === incident.category
@@ -519,10 +564,35 @@ export default function EventDrivenMonitor() {
             ?? report?.recommendations?.[0]
           const retrievedGuides = report?.search_activity?.flatMap((activity) => activity.documents)
             .filter((document) => document.source === 'runbooks') ?? []
-          return <article className={`incident-card ${incident.status === 'active' ? 'is-alerting' : 'is-ended'}`} key={incident.incident_id}>
+          return <article id={`incident-${incident.incident_id}`} className={`incident-card ${incident.status === 'active' ? 'is-alerting' : 'is-ended'}`} key={incident.incident_id}>
             <header className="incident-card-heading"><div><div className="section-kicker">{incident.status === 'active' ? 'NEW ALERT' : 'ALERT EPISODE ENDED'} — {incident.category.toUpperCase()}</div>
               <h2>Episode began {formatTime(incident.opened_at)}</h2><p>{totals.windows} alert {totals.windows === 1 ? 'window' : 'windows'} · {totals.tickets} tickets vs {totals.expected.toFixed(1)} expected</p></div>
               <div className="incident-statuses"><span className={`incident-state ${incident.status}`}>Alert episode {incident.status === 'active' ? 'active' : 'ended'}</span><span className="incident-operational-state">Incident {incident.operational_status}</span></div></header>
+            {attention && <section className={`attention-card attention-${attention.level}`} aria-label="Incident attention assessment">
+              <div><strong>{attention.level === 'immediate' ? 'IMMEDIATE' : attention.level === 'review_soon' ? 'REVIEW SOON' : 'MONITOR'}</strong>
+                <p>{attention.rationale}</p>
+                {attention.level === 'immediate' && <small>{attention.acknowledged_at ? `Acknowledged by ${attention.acknowledged_by ?? 'responder'} · ${formatTime(attention.acknowledged_at)}` : `Needs acknowledgement by ${formatTime(attention.acknowledgement_deadline)}`}</small>}
+                {attention.escalation_status === 'unavailable' && <small className="delivery-state">Escalation unavailable · no backup recipient is configured.</small>}
+                {attention.escalation_status === 'delivery_blocked' && <small className="delivery-state">Backup escalation blocked because the configured delivery mode changed.</small>}
+                {attention.outbox?.map((delivery) => <small className="delivery-state" key={delivery.recipient_role}>{delivery.recipient_role} email · {delivery.delivery_mode} · {delivery.status}{delivery.last_error ? ` · ${delivery.last_error}` : ''}</small>)}
+                {attention.outbox?.map((delivery) => <details className="email-preview" key={`preview-${delivery.recipient_role}`}>
+                  <summary>Email preview · {delivery.recipient_role === 'backup' ? 'backup escalation' : 'primary notification'}</summary>
+                  <div className="email-preview-content">
+                    <span className={`email-preview-status ${delivery.delivery_mode === 'simulated' ? 'is-simulated' : ''}`}>
+                      {delivery.delivery_mode === 'simulated' ? 'SIMULATED · no real email sent'
+                        : delivery.status === 'dispatched' ? 'SMTP accepted · delivery unverified'
+                          : `${delivery.status.toUpperCase()} · SMTP`}
+                    </span>
+                    <p><strong>To:</strong> {delivery.draft.to ?? delivery.recipient}</p>
+                    <p><strong>Subject:</strong> {delivery.draft.subject ?? delivery.subject}</p>
+                    <pre>{delivery.draft.body ?? delivery.body}</pre>
+                  </div>
+                </details>)}
+                {attention.history && attention.history.length > 0 && <details className="notification-history"><summary>Notification history ({attention.history.length})</summary>{attention.history.map((event) => <p key={`${event.event_type}-${event.occurred_at}`}><strong>{event.event_type.replaceAll('_', ' ')}</strong> · {formatTime(event.occurred_at)}{event.actor ? ` · ${event.actor}` : ''}</p>)}</details>}
+              </div>
+              {attention.level === 'immediate' && !attention.acknowledged_at && attention.notification_id && <button className="secondary-button" disabled={acknowledgingIds.has(attention.notification_id)} onClick={() => void acknowledge(attention)}>{acknowledgingIds.has(attention.notification_id) ? 'Saving…' : 'Acknowledge'}</button>}
+              {attention.level === 'immediate' && attention.escalation_status === 'superseded' && <small>Backup escalation sent; primary acknowledgement recorded afterward.</small>}
+            </section>}
             {incident.status === 'ended' && incident.operational_status === 'open' && <p className="incident-status-note">Ticket alerts have stopped for this episode. The incident remains open; this does not confirm the issue is resolved.</p>}
             {additionalChecks.length > 0 && <details className="alert-detector-details"><summary>Alert details</summary><p>Additional rate checks crossed their cutoffs: {additionalChecks.map((name) => detectorNames[name] ?? name).join(', ')}.</p></details>}
             <div className="investigation-state" aria-live="polite">

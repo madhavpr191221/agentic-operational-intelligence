@@ -91,7 +91,142 @@ class EventStore:
                     vector_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS live_replay_baselines (
+                    cache_key TEXT PRIMARY KEY,
+                    snapshot_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS live_replay_baseline_applied (
+                    stream_id TEXT PRIMARY KEY,
+                    cache_key TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );
             """)
+
+    def get_live_replay_baseline(self, cache_key: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT snapshot_json FROM live_replay_baselines WHERE cache_key=?", (cache_key,)
+            ).fetchone()
+            if row:
+                try:
+                    return json.loads(row[0])
+                except json.JSONDecodeError:
+                    connection.execute("DELETE FROM live_replay_baselines WHERE cache_key=?", (cache_key,))
+        return None
+
+    def delete_live_replay_baseline(self, cache_key: str) -> None:
+        with self._connection() as connection:
+            connection.execute("DELETE FROM live_replay_baselines WHERE cache_key=?", (cache_key,))
+
+    def save_live_replay_baseline(self, cache_key: str,
+                                  snapshot: dict[str, Any]) -> dict[str, Any]:
+        """Save an in-memory warm-up snapshot once for reuse by later runs."""
+        if snapshot.get("schema_version") != 1 or snapshot.get("cache_key") != cache_key:
+            raise ValueError("Cannot save an incompatible live baseline snapshot")
+        encoded = json.dumps(snapshot, separators=(",", ":"), ensure_ascii=False)
+        with self._connection() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO live_replay_baselines(cache_key,snapshot_json,created_at) VALUES(?,?,?)",
+                (cache_key, encoded, utc_now()),
+            )
+            row = connection.execute(
+                "SELECT snapshot_json FROM live_replay_baselines WHERE cache_key=?", (cache_key,)
+            ).fetchone()
+        return json.loads(row[0])
+
+    def apply_live_replay_baseline(self, run_id: str, stream_id: str, cache_key: str,
+                                   snapshot: dict[str, Any], window_count: int,
+                                   config_hash: str) -> bool:
+        """Hydrate one run from a cached baseline in a single idempotent transaction."""
+        if not isinstance(snapshot, dict):
+            raise ValueError("Cached baseline is malformed")
+        if (snapshot.get("schema_version") != 1 or snapshot.get("cache_key") != cache_key
+                or snapshot.get("config_hash") != config_hash
+                or snapshot.get("window_count") != window_count):
+            raise ValueError("Cached baseline is incompatible with this replay configuration")
+        checkpoint = snapshot.get("checkpoint", {})
+        observations = snapshot.get("observations", [])
+        events = snapshot.get("events", [])
+        if not isinstance(checkpoint, dict) or not isinstance(observations, list):
+            raise ValueError("Cached baseline is malformed")
+        if (checkpoint.get("window_index") != window_count - 1
+                or checkpoint.get("window_end") != snapshot.get("history_end")
+                or len(observations) != window_count
+                or any(not isinstance(item, dict) for item in observations)
+                or [item.get("window_index") for item in observations] != list(range(window_count))):
+            raise ValueError("Cached baseline is incomplete or out of order")
+        state = json.loads(checkpoint["state_json"])
+        if (not isinstance(state, dict) or not isinstance(state.get("detector"), dict)
+                or not isinstance(state.get("episodes"), dict) or state.get("episodes")):
+            raise ValueError("Cached baseline unexpectedly contains an active alert episode")
+        if (not isinstance(events, list) or any(not isinstance(item, dict) for item in events)
+                or len({item.get("evidence_id") for item in events}) != len(events)):
+            raise ValueError("Cached baseline evidence records are malformed")
+        if any(not all(key in item for key in ("evidence_id", "simulated_at", "source", "event_type", "payload_json"))
+               for item in events):
+            raise ValueError("Cached baseline evidence record is incomplete")
+
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            applied = db.execute(
+                "SELECT cache_key FROM live_replay_baseline_applied WHERE stream_id=?", (stream_id,)
+            ).fetchone()
+            if applied:
+                if applied["cache_key"] != cache_key:
+                    raise ValueError("A different baseline is already applied to this replay stream")
+                db.commit()
+                return False
+            if db.execute("SELECT 1 FROM detector_host_checkpoints WHERE stream_id=?", (stream_id,)).fetchone():
+                raise ValueError("Cannot apply a baseline after detector processing has started")
+            if db.execute("SELECT 1 FROM detector_host_observations WHERE stream_id=? LIMIT 1", (stream_id,)).fetchone():
+                raise ValueError("Cannot apply a baseline after observations have been recorded")
+
+            evidence_ids = {item["evidence_id"]: str(uuid.uuid4()) for item in events}
+
+            def remap(value: Any) -> Any:
+                if isinstance(value, dict):
+                    return {key: remap(item) for key, item in value.items()}
+                if isinstance(value, list):
+                    return [remap(item) for item in value]
+                if isinstance(value, str):
+                    return evidence_ids.get(value, value)
+                return value
+
+            event_rows = []
+            for item in events:
+                payload = remap(json.loads(item["payload_json"]))
+                event_rows.append((evidence_ids[item["evidence_id"]], run_id, item["simulated_at"],
+                                   item["source"], item["event_type"],
+                                   json.dumps(payload, separators=(",", ":"), ensure_ascii=False)))
+            db.executemany(
+                "INSERT INTO events(evidence_id,run_id,simulated_at,source,event_type,payload_json) "
+                "VALUES(?,?,?,?,?,?)", event_rows,
+            )
+            db.executemany(
+                "INSERT INTO detector_host_observations(stream_id,window_index,observation_json,result_json) "
+                "VALUES(?,?,?,?)",
+                [(stream_id, item["window_index"], item["observation_json"], item["result_json"])
+                 for item in observations],
+            )
+            db.execute(
+                "INSERT INTO detector_host_checkpoints(stream_id,config_hash,window_index,window_end,state_json) "
+                "VALUES(?,?,?,?,?)",
+                (stream_id, config_hash, checkpoint["window_index"], checkpoint["window_end"],
+                 checkpoint["state_json"]),
+            )
+            db.execute(
+                "INSERT INTO live_replay_baseline_applied(stream_id,cache_key,applied_at) VALUES(?,?,?)",
+                (stream_id, cache_key, utc_now()),
+            )
+            db.commit()
+            return True
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
 
     def get_cached_embedding(self, cache_key: str) -> list[float] | None:
         with self._connection() as connection:
