@@ -1,5 +1,7 @@
 # Local hybrid retrieval for incident investigation
 
+**Supporting retrieval implementation note for the [End-to-End MVP Implementation Plan](agentic_operational_intelligence_end_to_end_design_v2.md).** The master document governs when investigations run, their category/episode scope, and evidence lookback. This document describes the local synthetic archive and retrieval pipeline; it does not redefine the investigation workflow.
+
 ## Goal
 
 Give the investigator a larger, varied fictional evidence world and a real retrieval pipeline, while keeping the ticket-count detector independent. The investigator can search current-run evidence plus a dated archive of tickets, issue records, changes, operational references, and runbooks. The statistical detector still receives only category counts.
@@ -37,7 +39,9 @@ The index is local, reproducible, and ignored by Git. Model weights are download
 
 ## Time and source constraints
 
-Every dated corpus query accepts a lower time bound where appropriate and an inclusive `available_at <= investigation cutoff` bound. Category and service filters are applied before results are returned. The current simulation evidence stays in its run-scoped SQLite store; the archive index supplies historical context. Evidence includes its source and timestamp so a historical match cannot be presented as an event from the live run.
+Every investigation is scoped to one category episode and has a frozen evidence-availability cutoff. The first recent-incident search covers the alert window and two preceding completed windows. Expand recent ticket and service evidence to six hours and then at most 24 hours only when the current evidence leaves a material question unanswered; stop earlier when expansion adds no material evidence. Older persistent issues, changes, runbooks, and references are a separate relevance search and may extend beyond that recent-evidence horizon.
+
+Every dated corpus query must enforce `available_at <= investigation cutoff`; use a lower time bound where it applies to the selected recent-evidence expansion. Category and service filters are applied before results are returned. The current simulation evidence stays in its run-scoped SQLite store; the archive index supplies historical context. No future window, post-cutoff late arrival, or another category's episode may leak into this investigation. Evidence includes source and event/availability timestamps so a historical match cannot be presented as an event from the live episode or as proof of its cause.
 
 The product logs are numeric and structured. Search filters them by category, service, and time and returns request/error counts and rates; it does not ask a text embedding to reason about numeric telemetry. The LLM sees returned records only through the evidence tools and cannot access generator truth labels.
 

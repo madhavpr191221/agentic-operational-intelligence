@@ -39,7 +39,7 @@ flowchart TD
 
 The detector and investigator have separate inputs: the detector gets counts; the investigator gets an alert and can search the stored evidence. The source continues to supply every category, while the incident inbox can focus on the category that alerted and show other categories as context.
 
-For the first implementation, these are modules inside **one backend application and one SQLite database**, not separate services. The evidence store, count detector, alert queue, investigator, and report can all run locally. Durable delivery and recovery still matter, but an outbox and a background worker can be added inside this same application. A message broker, multiple servers, and automatic cross-incident grouping are later options, not prerequisites.
+For the MVP, these are modules inside **one backend application and one SQLite database**, not separate services. Use a durable FIFO investigation queue and one worker, plus a durable notification outbox and a separate delivery/scheduling loop. A message broker, multiple servers, and automatic cross-incident grouping are later options, not prerequisites. The governing scope, full workflow, implementation stages, and completion gates are in [the End-to-End MVP Implementation Plan](agentic_operational_intelligence_end_to_end_design_v2.md); [queue and notification reliability details](investigation-queue-lifecycle.md) support that plan.
 
 The full sections below describe reliability rules for when the project grows. The local prototype keeps these responsibilities inside one application. Evaluator-only scenario truth remains outside the runtime diagram and is used only in offline checks.
 
@@ -122,7 +122,7 @@ The text index is part of the evidence-search capability. The alert queue can in
 | Detection | `CountObservation -> DetectionResult`; count-only module; SQLite detector checkpoint; episode outbox and incident registry | Resume an interrupted replay and version detector configuration changes. |
 | Runtime | `OperationsRuntime` runs the replay and one investigation worker in the API process | Separate worker lifetimes only when the local demo needs independent processes. |
 | Initiation | Each replay stores its automatic or manual mode; automatic episodes queue an initial persisted job | Add durable replay resume and operator-configurable follow-up policy. |
-| Persistence | SQLite stores run events, detector checkpoints, outbox events, incidents, jobs, reports, and embeddings. Opening an episode and creating its initial job happen in one transaction. | Add leased jobs, provider-budget controls, report version metadata, and migration handling. Running jobs are marked for operator review after restart because a provider call may already have been billed. |
+| Persistence | SQLite stores run events, detector checkpoints, outbox events, incidents, jobs, reports, and embeddings. Opening an episode and creating its initial job happen in one transaction. | Add persisted leases/fencing, one bounded automatic retry (two attempts total), one committed report per job, provider-budget controls, and migration handling. Retain exhausted jobs for operator review. A retry may repeat a provider call and cost. |
 | Retrieval | The worker freezes the event sequence and source-time cutoff; existing keyword/vector retrieval, GPU reranking, and structured service queries are used | Pin a specific archive-index generation and report source coverage more fully. |
 | Agent | Existing investigator runs through the persisted worker; reports include hypotheses, evidence references, unknowns, and retrieval activity | Add a single bounded read tool, explicit job resource budgets, and richer report revision comparisons. |
 | UI | One monitor view shows latest counts for all categories and the current replay's alert, investigation status, and report; prior replays remain in history | Add production data-source connectors and richer cross-incident browsing. |
@@ -138,7 +138,7 @@ The prototype now has durable scheduling and run-evidence snapshot bounds for it
 | Count projection | Deduplication, window assignment, category counts, completeness | Ticket meaning, log relevance, remediation |
 | Statistical engine | Baselines, scores, thresholds, statistical episode continuity | Which documents to search or whether a deployment caused an incident |
 | Detector host | Ordered processing, checkpoint/replay, durable alert publication | Evidence-based causal explanations |
-| Incident coordinator | Job creation, priority, deduplication, cooldowns, budgets | Inventing a diagnosis or changing detector thresholds |
+| Incident coordinator | Job creation, urgency/notification decisions, deduplication, cooldowns, budgets | Inventing a diagnosis or changing detector thresholds |
 | Investigation worker | Tool execution policy, model calls, report generation | Reading hidden truth, changing alerts, executing a fix |
 | Evidence and retrieval services | Authorized scope, versions, filters, numeric analysis, passage retrieval | Treating a high search score as proof of a cause |
 | Report validator | Evidence identity, numeric/source provenance, time scope, schema | Guaranteeing causal correctness merely because citations exist |
@@ -194,23 +194,21 @@ The outbox is a durable list of unpublished alert events in the application data
 | Trigger | Default scheduling action |
 | --- | --- |
 | New episode | Create an incident and queue its initial investigation immediately. Do not wait for the episode to finish. |
-| Episode extends | Update the incident's observed scope. Coalesce updates into at most one pending follow-up. |
+| Episode extends | Update live statistics only. Do not queue work for alert counts alone; significant new evidence can qualify under the follow-up rule. |
 | Material new evidence | Request a follow-up, subject to cooldown and budget. Record what changed. |
 | Identical alert delivery or repeated button request | Return the existing job for the same idempotency key. |
-| Episode ends | Update statistical status. Consider one final follow-up when new evidence or an unresolved question warrants it. |
+| Episode ends | Finalize statistical status only. The first quiet window does not automatically queue an investigation or close the operational incident. |
 | Operator requests another investigation | Create a new revision request with an explicit reason and current cutoff; preserve the prior report. |
 
 The initial job retains the first-alert snapshot even if the replay finishes while it waits. Do not silently replace it with the final episode. Pending follow-up jobs can coalesce to the latest eligible snapshot until claimed; record that decision. A running job's context never changes.
 
-Proposed refresh policy: no more than one automatic follow-up per incident per counting window; require new eligible evidence or a changed signal. A high-priority escalation can bypass the cooldown once for that escalation version. Once an episode has ended, keep it eligible for automatic evidence updates for a bounded watch period (proposed: 24 source-clock hours); later reviews are manual. These values need evaluation, not statistical tuning of the detector.
+MVP follow-up policy: automatic follow-ups require significant new evidence, use the adopted configurable cooldown and per-episode cap, and coalesce qualifying evidence during cooldown. Manual requests remain available. The specific demo defaults are recorded in the decision register; no final investigation runs solely because the episode ended.
 
 Examples of material evidence are a newly visible issue linked to the affected service, a new failed-request trace, or a newly completed service-metric window. Generic document updates do not automatically re-investigate every incident. Matching uses explicit service/entity references and incident time ranges, with uncertain correlations left for review.
 
 ## 10. One incident, queue batches, and shared causes
 
-Start with **one incident per investigation job and one running job**. A burst of 20 alerts becomes 20 durable records; the worker drains the queue by priority and age. Queue batching is an operational scheduling choice, not permission to mix unrelated incidents in one prompt. Rate limits and concurrency caps prevent a burst from creating 20 simultaneous provider requests.
-
-Use a configured priority based on observed excess, persistence, and service importance. Label it investigation priority, not probability of failure. Age waiting jobs so low-priority incidents do not starve. Expose backlog size and oldest waiting age.
+Start with **one incident per investigation job and one running job**. A burst of 20 alerts becomes 20 durable jobs; the worker drains them in FIFO enqueue order. Queue batching is not part of the MVP and jobs from different episodes never share an investigator context. FIFO can delay later jobs behind a slow investigation, so expose queue depth and oldest waiting age. Priority scheduling and concurrency increases are deferred until measured queue behavior justifies them.
 
 Later, add a correlation pass that proposes related incidents using overlapping intervals and a versioned dependency map. Temporal proximity alone cannot establish a common cause. A joint investigation must support each category with its own evidence and retain alternatives. Initially, show related incidents and investigate them independently. This is easier to audit than prematurely merging their histories.
 
@@ -338,15 +336,15 @@ All mutation requests record who or what initiated them. Pagination, response si
 
 ## 15. Reliability, resource limits, and deployment
 
-Start on the existing machine with three long-running Python roles: API, monitor/coordinator, and investigation worker. Serve the existing web application separately. The replay adapter runs under the monitoring role; offline corpus/index building is an explicit maintenance job. These are independently restartable processes with logical modules, not a requirement for separate network microservices.
+For the MVP, keep the API, replay/monitor coordinator, and single investigation worker in the existing backend application/runtime; serve the web application separately. The notification dispatcher and acknowledgement scheduler are independent loops so slow investigations do not block them. Splitting API, monitoring, and worker into independently restartable Python processes is a later deployment option, not an MVP requirement. Offline corpus/index building remains an explicit maintenance job.
 
 Use the existing local database initially for transactions, the outbox, jobs, and reports. Keep transactions short; never hold one while calling the model or running GPU inference. A future database/broker migration should be driven by measured lock contention, ingestion volume, queue latency, or multiple hosts. Keep storage and job interfaces explicit so that migration does not change detector or tool contracts.
 
 The investigation worker retains the embedding and reranking models in memory and processes one job at a time. It claims a job with a time-limited lease and renews it independently of model latency. A monotonically increasing attempt token fences writes from an old worker whose lease expired. Publish a report and complete its job atomically. A unique job/revision identity prevents duplicate visible reports.
 
-Delivery is at least once. Repeated delivery or a crash may repeat a provider call; exactly-once model billing is not promised. Persist completed tool results and call usage where possible, reuse safe results within the same frozen context, and do not retry an ambiguous paid call blindly. An operator-visible partial report is preferable when the remaining budget cannot safely support another attempt.
+Investigation delivery is at least once. A lease-expired job may be retried once under the two-attempt MVP policy, so a crash can repeat provider execution and cost. Fence stale workers and commit at most one report per stable job ID; exactly-once model execution or billing is not promised. Persist completed tool results and call usage where possible, reuse safe results within the same frozen context, and expose uncertain outcomes. Notification delivery follows its separate outbox policy: retry an ambiguous send only when provider idempotency or known-not-sent status makes it safe; otherwise record uncertainty for review.
 
-Proposed initial limits, configurable and to be validated during implementation:
+Initial MVP execution limits (configurable where stated; numeric values are operational defaults, not empirically optimized):
 
 | Limit | Starting policy |
 | --- | --- |
@@ -355,19 +353,21 @@ Proposed initial limits, configurable and to be validated during implementation:
 | Model requests | At most 12 across reasoning and report composition; reserve capacity for the final report |
 | Job execution time | 3 minutes after worker readiness; timeouts produce a persisted partial/failed outcome |
 | Tool output size | Bounded by record count and token allowance; preserve truncation and coverage metadata |
-| Retry policy | At most 2 retries for transient failures, with backoff; setup/auth/schema failures block until repaired |
-| Follow-up frequency | At most once per counting window unless a new priority escalation justifies one bypass |
+| Retry policy | One automatic retry for a job (two attempts total), preserving job ID and evidence cutoff; exhausted jobs remain for operator review |
+| Automatic follow-ups | Configurable 10-minute cooldown from the latest investigation completion; at most two automatic follow-ups per episode, excluding the initial investigation. Coalesce qualifying evidence during cooldown; manual requests bypass the cooldown and cap. |
 | Spending policy | Explicit per-job token limits and a configured daily allowance for live automatic mode; estimates reconciled with reported usage |
 
-These are proposed orchestration limits, not claims about current defaults or measured optimal values. Current code uses a larger total tool ceiling. Account for all model requests including composition and application-level retries; avoid unobserved retries bypassing the budget. Currency estimates are not a hard provider-side billing cap. Reserve a bounded next call before dispatch and stop new jobs when the local allowance is exhausted.
+These MVP orchestration limits are not claims about measured optimal values. Current code uses a larger total tool ceiling. Account for all model requests including composition and the one bounded application-level retry; avoid unobserved retries bypassing the budget. Currency estimates are not a hard provider-side billing cap. Reserve a bounded next call before dispatch and stop new jobs when the local allowance is exhausted.
 
 Automatic mode is configured once for the environment. Normal incident handling should not require a new permission dialog for every call. An offline deterministic worker supports unlimited local replay without live model requests. Changing mode, policy, or budget creates an auditable configuration version.
 
 | Failure | Required behavior |
 | --- | --- |
-| API restarts | Monitoring and active worker jobs continue; UI reconnects to persisted state. |
+| API restarts | Monitoring resumes from persisted state; queued jobs remain queued; expired leases are recovered under the bounded retry policy; notification deadlines remain unchanged. |
 | Detector host restarts | Restore committed checkpoint and resume ordered observations without duplicate episodes. |
-| Worker crashes | Lease expires; eligible job retries under a new fenced attempt; preserve prior results and usage. |
+| Worker crashes | Lease expires; one retry is allowed under a new fenced attempt; preserve prior results and usage, and do not duplicate committed reports. |
+| Email provider timeout | Reuse stable notification ID and provider idempotency where supported; otherwise record ambiguous delivery for review instead of blindly retrying. |
+| Simulated notification mode | Record simulated dispatch without making any network email request. |
 | GPU package/model missing | Mark search readiness unavailable with an actionable setup message; use a declared fallback or block jobs according to policy. |
 | No matching reference | Record a successful empty search; continue with available incident evidence. |
 | Provider unavailable or allowance exhausted | Preserve queued work, mark wait/block reason, and keep detection running. |
@@ -387,7 +387,8 @@ Evaluate the components separately, then test the full event flow:
 | --- | --- |
 | Ingestion | Duplicate deliveries do not change counts; one ticket equals one contact; updates and chunks do not add events; missing intervals remain unknown. |
 | Detection | Same count sequence gives the same alerts regardless of wording or evidence; restart matches uninterrupted state; correction handling is explicit. Preserve existing thresholds during this milestone. |
-| Delivery | Crash between detector persistence and dispatch loses no alert; redelivery produces one incident/job; worker restart produces one published revision. |
+| Delivery | Crash between detector persistence and dispatch loses no alert; redelivery produces one incident/job; durable notification outbox preserves attempts; simulated mode makes no email network call. |
+| Restart recovery | Restart with queued/running/completed jobs and immediately before acknowledgement deadline; verify FIFO, lease expiry, bounded retry, report uniqueness, unchanged deadline, and acknowledgement-aware escalation. |
 | Time isolation | Future issue updates and T+1 records cannot appear in revision 1; late imports cannot enter a frozen snapshot; accelerated replay preserves first-alert scope. |
 | Retrieval | Relevant passages survive source/time filters; full-record expansion stays scoped; evidence versions resolve; missing dependencies differ from zero matches. Include hard negatives and queries with no relevant document. |
 | Investigation | Payment incident supports the correct symptom; innocent changes are not blamed solely for timing; ambiguous evidence yields uncertainty; historical guides do not become current incident facts. |
@@ -424,9 +425,9 @@ Stages should remain reviewable. Avoid a single rewrite of detection, retrieval,
 | Batch handling | Queue multiple jobs; keep their prompts and reports separate | Absorbs bursts without mixing unrelated causes. |
 | Shared causes | Add evidence-supported correlation after the single-incident flow works | Avoids merging unrelated incidents merely because they overlap. |
 | Tools | Seven, including a bounded read tool | Adds full-context inspection to existing search and analysis. |
-| Runtime | API, monitor/coordinator, one GPU investigation worker | Isolates failures without requiring a distributed platform. |
+| Runtime | MVP: one backend application/runtime with monitoring/coordinator and one investigation worker; web UI served separately | Keep deployment simple. Independent Python processes are a later option if measured reliability or capacity needs justify them. |
 | Storage | Existing local database plus durable outbox/jobs; versioned search generations | Meets local reliability needs and preserves clear replacement interfaces. |
 | Statistical scope | Preserve current calibrated detector behavior | Focuses this milestone on operational integration and investigative quality. |
 | Remediation | Advice plus verification and provenance | Keeps operational execution outside this project milestone. |
 
-These recommendations are ready for discussion. The follow-up cooldown, evidence-watch period, concurrency and resource ceilings are engineering defaults to validate, not settled product requirements.
+This document includes broader architectural options. The [End-to-End MVP Implementation Plan](agentic_operational_intelligence_end_to_end_design_v2.md) is authoritative for the MVP scope and build sequence; the [queue and notification reliability details](investigation-queue-lifecycle.md) provide supporting requirements. Do not treat superseded alternatives in this broader architecture as current MVP scope.
