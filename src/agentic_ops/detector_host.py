@@ -189,6 +189,24 @@ class DetectorHost:
         """Return the count-only baseline and display limits for the monitor."""
         return self.suite.monitoring_snapshot()
 
+    def restore_runtime_state(self, state_json: str) -> None:
+        """Restore detector and episode state after a cached stream bootstrap."""
+        state = json.loads(state_json)
+        self.suite.restore(state["detector"])
+        self.tracker.restore(state["episodes"])
+
+    def validate_runtime_state(self, state_json: str) -> None:
+        """Validate a cached state against this host without changing its state."""
+        detector_before = self.suite.checkpoint()
+        episodes_before = self.tracker.checkpoint()
+        try:
+            state = json.loads(state_json)
+            self.suite.restore(state["detector"])
+            self.tracker.restore(state["episodes"])
+        finally:
+            self.suite.restore(detector_before)
+            self.tracker.restore(episodes_before)
+
     def pending_events(self) -> list[dict[str, Any]]:
         """Read undelivered events in window and insertion order."""
         with self.store._connection() as db:

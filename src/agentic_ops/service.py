@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import threading
 import time
@@ -23,12 +25,112 @@ from agentic_ops.detector_host import DetectorHost
 from agentic_ops.incident_worker import IncidentWorker
 from agentic_ops.notifications import NotificationCoordinator
 from agentic_ops.evidence import EvidenceTools
-from agentic_ops.simulation import GeneratedEvent, GeneratedWindow, generate_live_week, generate_run
+from agentic_ops.simulation import (
+    LIVE_REPLAY_BASELINE_CACHE_VERSION,
+    LIVE_REPLAY_BASELINE_SEED,
+    GeneratedEvent,
+    GeneratedWindow,
+    generate_live_stream,
+    generate_live_week,
+    generate_run,
+)
 from agentic_ops.retrieval import load_knowledge_passages, load_runbook_pages
 from agentic_ops.search_activity import summarize_search_trace
 from agentic_ops.store import EventStore
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _live_baseline_cache_key(config: SimulationConfig, detector_host: DetectorHost) -> str:
+    """Identify all configuration and generator inputs that define shared history."""
+    inputs = {
+        "cache_version": LIVE_REPLAY_BASELINE_CACHE_VERSION,
+        "seed": LIVE_REPLAY_BASELINE_SEED,
+        "window_count": config.monitor_history_windows,
+        "arrival_model": config.arrival_model,
+        "baseline_category_means": config.baseline_category_means,
+        "payment_attempts_per_window": config.payment_attempts_per_window,
+        "contact_probability_per_failure": config.contact_probability_per_failure,
+        "negative_binomial_shape": config.negative_binomial_shape,
+        "detector_config_hash": detector_host.config_hash,
+    }
+    encoded = json.dumps(inputs, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def _build_live_baseline_snapshot(history: list[GeneratedWindow], config: SimulationConfig,
+                                  detector_host: DetectorHost, cache_key: str) -> dict[str, Any]:
+    """Build reusable history evidence and count-only detector state in memory."""
+    events: list[dict[str, Any]] = []
+    observations: list[dict[str, Any]] = []
+    ordinal = 0
+
+    def append_event(simulated_at: str, source: str, event_type: str,
+                     payload: dict[str, Any]) -> str:
+        nonlocal ordinal
+        evidence_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{cache_key}:{ordinal}"))
+        ordinal += 1
+        events.append({"evidence_id": evidence_id, "simulated_at": simulated_at,
+                       "source": source, "event_type": event_type,
+                       "payload_json": json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                                                  ensure_ascii=False, allow_nan=False)})
+        return evidence_id
+
+    for window in history:
+        for generated in window.events:
+            payload = dict(generated.payload)
+            payload["replay_phase"] = "history"
+            append_event(generated.simulated_at, generated.source, generated.event_type, payload)
+
+        observation_body = {
+            "window_index": window.index,
+            "window_start": window.start,
+            "window_end": window.end,
+            "category_counts": dict(window.category_counts),
+        }
+        observation_json = json.dumps(observation_body, sort_keys=True, separators=(",", ":"),
+                                      allow_nan=False)
+        count_observation = CountObservation(
+            window_index=window.index,
+            window_start=window.start,
+            window_end=window.end,
+            category_counts=window.category_counts,
+        )
+        detection = detector_host.suite.update(count_observation).to_dict()
+        if any(category["alerted"] for category in detection["categories"].values()):
+            raise ValueError("The fixed history window unexpectedly emitted a detector alert")
+        result_json = json.dumps(detection, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+        observation_evidence_id = append_event(
+            window.end, "detector", "window_observation",
+            {"schema_version": 1, **observation_body, "ticket_count": window.ticket_count},
+        )
+        append_event(
+            window.end, "detector", "window_score",
+            {"schema_version": 1, "window_index": window.index,
+             "observed": window.ticket_count, "category_counts": dict(window.category_counts),
+             "scores_by_category": detection["categories"],
+             "calibration": window.index < config.calibration_windows,
+             "observation_evidence_id": observation_evidence_id,
+             "detection_result": detection},
+        )
+        observations.append({"window_index": window.index, "observation_json": observation_json,
+                             "result_json": result_json})
+
+    state = {"detector": detector_host.suite.checkpoint(), "episodes": {}}
+    state_json = json.dumps(state, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return {
+        "schema_version": 1,
+        "cache_key": cache_key,
+        "config_hash": detector_host.config_hash,
+        "window_count": len(history),
+        "history_start": history[0].start,
+        "history_end": history[-1].end,
+        "events": events,
+        "observations": observations,
+        "checkpoint": {"window_index": history[-1].index,
+                       "window_end": history[-1].end, "state_json": state_json},
+    }
 
 
 def _load_openai_key_from_dotenv() -> None:
@@ -64,6 +166,7 @@ class OperationsRuntime:
         self._provided_investigator = investigator
         self._controls: dict[str, RunControl] = {}
         self._lock = threading.Lock()
+        self._live_baseline_lock = threading.Lock()
         self.incident_worker = IncidentWorker(self.store, self._investigator, self.evidence)
         self.incident_worker.start()
         self.notifications = NotificationCoordinator(self.store)
@@ -261,25 +364,50 @@ class OperationsRuntime:
 
     def _run_live_week(self, run_id: str, config: SimulationConfig, control: RunControl,
                        detector_host: DetectorHost, automatic: bool) -> None:
-        windows = generate_live_week(config)
         history_end = config.monitor_history_windows
-        history = windows[:history_end]
-        stream = windows[history_end:]
+        cache_key = _live_baseline_cache_key(config, detector_host)
+        with self._live_baseline_lock:
+            cached_baseline = self.store.get_live_replay_baseline(cache_key)
+            if cached_baseline is not None:
+                try:
+                    detector_host.validate_runtime_state(cached_baseline["checkpoint"]["state_json"])
+                    self.store.apply_live_replay_baseline(
+                        run_id, run_id, cache_key, cached_baseline, history_end, detector_host.config_hash,
+                    )
+                except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+                    # A damaged or structurally obsolete cache is safe to rebuild.
+                    self.store.delete_live_replay_baseline(cache_key)
+                    cached_baseline = None
 
-        # History is genuinely in the past at stream start, so it can be loaded
-        # up front and used to warm the existing detector without creating alerts.
-        for window in history:
-            for generated in window.events:
-                self._store_generated_event(run_id, generated, "history")
-            self._process_window(run_id, config, window, detector_host, automatic)
+            if cached_baseline is not None:
+                # Reuse count-only detector state and historical evidence, then
+                # generate only the seeded portion that will actually stream.
+                detector_host.restore_runtime_state(cached_baseline["checkpoint"]["state_json"])
+                stream = generate_live_stream(config)
+                cache_status = "reused"
+                baseline_snapshot = cached_baseline
+            else:
+                windows = generate_live_week(config)
+                history = windows[:history_end]
+                stream = windows[history_end:]
+                baseline_snapshot = _build_live_baseline_snapshot(
+                    history, config, detector_host, cache_key,
+                )
+                detector_host.validate_runtime_state(baseline_snapshot["checkpoint"]["state_json"])
+                baseline_snapshot = self.store.save_live_replay_baseline(cache_key, baseline_snapshot)
+                self.store.apply_live_replay_baseline(
+                    run_id, run_id, cache_key, baseline_snapshot, history_end, detector_host.config_hash,
+                )
+                detector_host.restore_runtime_state(baseline_snapshot["checkpoint"]["state_json"])
+                cache_status = "created"
 
-        baseline = detector_host.monitoring_snapshot()
-        self.store.add_event(
-            run_id, history[-1].end if history else "2026-01-01T00:00:00Z",
-            "detector", "detector_baseline_ready" if baseline["baseline_ready"] else "detector_baseline_status",
-            {**baseline, "history_start": history[0].start if history else None,
-             "history_end": history[-1].end if history else None},
-        )
+            baseline = detector_host.monitoring_snapshot()
+            self.store.add_event(
+                run_id, baseline_snapshot["history_end"], "detector",
+                "detector_baseline_ready" if baseline["baseline_ready"] else "detector_baseline_status",
+                {**baseline, "history_start": baseline_snapshot["history_start"],
+                 "history_end": baseline_snapshot["history_end"], "baseline_cache": cache_status},
+            )
 
         if not stream:
             self.store.set_run_status(run_id, "completed")

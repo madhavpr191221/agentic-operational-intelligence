@@ -11,6 +11,7 @@
 - The outbox stores a versioned structured email draft alongside its exact subject and body. The draft snapshots the alert facts, evidence cutoff, investigation state and any already-available finding, uncertainty, requested response, recipient, and incident link. It is deterministic and adds no LLM call. Later evidence does not rewrite the saved message.
 - The monitor displays a collapsible preview of the exact persisted email for each primary or backup delivery, including recipient, subject, body, and a clear simulated/no-real-email label or SMTP status. Incident links open the matching replay and scroll to its incident card. Immediate notifications can still be acknowledged in the card.
 - The API exposes `GET /api/notifications` and `POST /api/notifications/{notification_id}/acknowledge`. Runtime shutdown now stops the notification and investigation workers using FastAPI lifespan cleanup.
+- The fixed four-day detector warm-up is cached in the local SQLite database by seed, simulation settings, detector configuration, and cache version. The first run prepares and saves it; later compatible replays hydrate the baseline and start generating the Day 5 stream directly. Cached historical evidence receives fresh IDs per replay, and cache application is transactional and idempotent. The cache contains only generated observable history, count-only detector observations, and detector state; it does not contain evaluator truth.
 
 ## MVP defaults and configuration
 
@@ -30,7 +31,7 @@ See `.env.example` for the full settings list. Configure `AOI_PRIMARY_EMAIL`, `A
 
 ## See it in the UI
 
-1. Start the application and select a High spike replay. The statistical detector and automatic OpenAI investigation run as before.
+1. Start the application and select a High spike replay. On the first compatible run, the fixed history is prepared and saved. Later runs reuse it and begin streaming on Day 5 without repeating that preparation. The statistical detector and automatic OpenAI investigation run as before.
 2. When the episode appears, read its attention card. **Immediate** shows its reason, acknowledgement deadline, email mode/status, and the Acknowledge button. **Review soon** and **Monitor** appear without an urgent email.
 3. Acknowledge an Immediate notification. Its card shows the configured operator name and timestamp. If left unacknowledged, the coordinator queues one backup email after the configured wall-clock timeout. The demonstration defaults to simulated delivery and sends no email to a real recipient.
 4. Expand **Email preview** to inspect the exact saved message and recipient; simulated mode is explicitly labeled and sends nothing. Expand **Notification history** to inspect creation, dispatch, acknowledgement, and escalation facts. A provider acceptance is not shown as delivery confirmation.
@@ -42,6 +43,7 @@ Stage 3 automated checks cover source independence, trusted critical signals, ti
 ## Limits and deferred work
 
 - Thresholds and trusted-source configuration are demo defaults, not validated alerting policies. Source trust and service-specific critical conditions require organization-specific configuration before production use.
+- The replay-baseline cache is local to the configured SQLite database. Changing any cache-key input or cache version intentionally causes a cold preparation; deleting the local database also removes the cache.
 - There is no provider delivery-receipt webhook or verified **delivered** state. The system records created, dispatched, failed/unknown, acknowledged, and escalated facts that it can observe.
 - The configured operator display name is not authenticated. Role-based authorization and identity verification belong to Stage 4.
 - Urgency stays at the highest level reached until human incident workflow is implemented. This avoids treating recovery indications or quiet counts as resolution; it is not an incident closure policy.

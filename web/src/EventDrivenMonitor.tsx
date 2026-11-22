@@ -492,7 +492,11 @@ export default function EventDrivenMonitor() {
       <section className="counts-panel panel" aria-label="Latest category ticket counts">
         <div className="counts-heading"><div><div className="section-kicker">{liveWeek && run?.status !== 'completed' ? 'LIVE WINDOW — TICKETS SO FAR' : liveWeek ? 'LAST COMPLETED WINDOW' : 'TICKET COUNTS — LAST 30 MINUTES'}</div><h2>{countsHeading}</h2></div><span>{run ? (liveWeek ? `${streamCompletedWindows}/144 windows streamed` : `${observations.length} windows`) : 'No replay'}</span></div>
         {liveWeek && <p className="counts-context">{baseline?.baseline_ready
-          ? `Usual counts and alert cutoffs learned from ${Number(baseline.warmup_windows ?? historyWindows)} earlier windows. Scores update when each 30-minute window closes.`
+          ? baseline.baseline_cache === 'reused'
+            ? `Saved four-day baseline reused. Scores update when each 30-minute window closes.`
+            : baseline.baseline_cache === 'created'
+              ? `Four-day baseline prepared and saved. Future replays can start directly on Day 5.`
+              : `Usual counts and alert cutoffs learned from ${Number(baseline.warmup_windows ?? historyWindows)} earlier windows. Scores update when each 30-minute window closes.`
           : 'Preparing the usual counts and alert cutoffs from earlier windows.'}</p>}
         <div className="count-table"><div className="count-row count-header"><span>Category</span><span>Tickets now</span><span>Usual / 30 min</span><span>Z-score</span><span>CUSUM</span><span>Bayes factor</span><span>Status</span></div>
           {categoryNames.map((category) => {

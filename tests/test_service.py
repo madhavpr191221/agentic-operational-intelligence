@@ -70,6 +70,22 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(snapshot["payload"]["categories"]["payments"]["expected_count"], 5)
         self.assertEqual(self.runtime.store.get_run(run)["status"], "completed")
 
+        # The next seeded replay should hydrate the four-day-equivalent prefix
+        # from the persistent snapshot and generate only its streamed suffix.
+        second_run = self.runtime.store.create_run("healthy", 42, "poisson", {})
+        second_host = DetectorHost(
+            self.runtime.store, second_run,
+            CategoryDetectorSuite("poisson", 1, ("payments", "orders", "account", "delivery")),
+        )
+        with patch("agentic_ops.service.generate_live_week", side_effect=AssertionError(
+                "cached replay should not regenerate the history prefix")), \
+             patch("agentic_ops.service.generate_live_stream", return_value=[]):
+            self.runtime._run_live_week(second_run, config, RunControl(), second_host, automatic=False)
+        reused = next(event for event in self.runtime.store.list_events(second_run, limit=100)
+                      if event["event_type"] == "detector_baseline_ready")
+        self.assertEqual(reused["payload"]["baseline_cache"], "reused")
+        self.assertEqual(self.runtime.store.get_run(second_run)["status"], "completed")
+
     def test_new_runtime_stops_persisted_replay_from_previous_process(self):
         run_id = self.runtime.store.create_run("healthy", 42, "poisson", {
             "monitor_history_windows": 192,
