@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from collections.abc import AsyncIterator
 from typing import Literal
 
@@ -67,6 +68,16 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
     def incidents(stream_id: str | None = None) -> list[dict]:
         return list_incidents(app.state.runtime.store, stream_id)
 
+    @app.get("/api/investigation-queue")
+    def investigation_queue() -> dict:
+        with app.state.runtime.store._connection() as db:
+            rows = db.execute("SELECT COALESCE(queued_at,created_at) AS queued_at FROM incident_jobs WHERE status='queued' ORDER BY queue_order,rowid").fetchall()
+            running = db.execute("SELECT COUNT(*) FROM incident_jobs WHERE status='running'").fetchone()[0]
+            pending = db.execute("SELECT COUNT(*) FROM pending_investigation_followups").fetchone()[0]
+        oldest = min((datetime.fromisoformat(row["queued_at"].replace("Z", "+00:00")) for row in rows), default=None)
+        return {"queued": len(rows), "running": running, "pending_followups": pending,
+                "oldest_wait_seconds": max(0, int((datetime.now(timezone.utc) - oldest).total_seconds())) if oldest else None}
+
     @app.get("/api/incidents/{incident_id}")
     def incident(incident_id: str) -> dict:
         found = next((item for item in list_incidents(app.state.runtime.store)
@@ -74,8 +85,9 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
         if found is None:
             raise HTTPException(status_code=404, detail="Unknown incident")
         with app.state.runtime.store._connection() as db:
-            jobs = db.execute("SELECT job_id,reason,cutoff,status,created_at,error FROM incident_jobs "
-                              "WHERE incident_id=? ORDER BY created_at,rowid", (incident_id,)).fetchall()
+            jobs = db.execute("SELECT j.job_id,j.reason,j.cutoff,j.status,j.created_at,j.error,r.revision FROM incident_jobs j "
+                              "LEFT JOIN incident_report_revisions r ON r.job_id=j.job_id "
+                              "WHERE j.incident_id=? ORDER BY j.created_at,j.rowid", (incident_id,)).fetchall()
         return {**found, "investigations": [dict(row) for row in jobs]}
 
     @app.post("/api/incidents/{incident_id}/investigations", status_code=202)
@@ -102,12 +114,11 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
         if revision < 1:
             raise HTTPException(status_code=404, detail="Unknown report")
         with app.state.runtime.store._connection() as db:
-            rows = db.execute("SELECT job_id,cutoff,report_json FROM incident_jobs "
-                              "WHERE incident_id=? AND status='completed' ORDER BY created_at,rowid",
-                              (incident_id,)).fetchall()
-        if revision > len(rows):
+            row = db.execute("SELECT j.job_id,j.cutoff,j.report_json FROM incident_report_revisions r "
+                             "JOIN incident_jobs j ON j.job_id=r.job_id "
+                             "WHERE r.incident_id=? AND r.revision=?", (incident_id, revision)).fetchone()
+        if row is None:
             raise HTTPException(status_code=404, detail="Unknown report")
-        row = rows[revision - 1]
         return {"incident_id": incident_id, "revision": revision, "job_id": row["job_id"],
                 "cutoff": row["cutoff"], "report": json.loads(row["report_json"])}
 

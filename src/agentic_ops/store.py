@@ -191,8 +191,8 @@ class EventStore:
             sql += " AND sequence<=?"
             params.append(max_sequence)
         if as_of is not None:
-            sql += " AND simulated_at<=?"
-            params.append(as_of)
+            sql += " AND simulated_at<=? AND COALESCE(json_extract(payload_json,'$.available_at'),simulated_at)<=?"
+            params.extend((as_of, as_of))
         if event_types:
             type_slots = ",".join("?" for _ in event_types)
             sql += f" AND event_type IN ({type_slots})"
@@ -230,7 +230,8 @@ class EventStore:
             ).fetchall()
         return [self._event(row) for row in rows
                 if (max_sequence is None or row["sequence"] <= max_sequence)
-                and (as_of is None or row["simulated_at"] <= as_of)]
+                and (as_of is None or (row["simulated_at"] <= as_of
+                     and (json.loads(row["payload_json"]).get("available_at") or row["simulated_at"]) <= as_of))]
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self._connection() as connection:

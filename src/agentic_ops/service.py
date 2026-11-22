@@ -239,6 +239,7 @@ class OperationsRuntime:
                                   "observation_evidence_id": observation["evidence_id"],
                                   "window_score_evidence_id": score_event["evidence_id"]})
         detector_host.deliver_pending(automatic=automatic)
+        detector_host.observe_completed_window(count_observation, automatic=automatic)
 
     def _run_live_week(self, run_id: str, config: SimulationConfig, control: RunControl,
                        detector_host: DetectorHost, automatic: bool) -> None:

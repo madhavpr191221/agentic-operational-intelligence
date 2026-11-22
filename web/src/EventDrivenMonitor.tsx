@@ -35,7 +35,7 @@ type Report = {
     available_through?: string | null
   }>
 }
-type Job = { job_id: string; reason: string; cutoff: string; status: string; created_at: string; error?: string | null; report?: Report | null }
+type Job = { job_id: string; reason: string; cutoff: string; status: string; created_at: string; revision?: number | null; error?: string | null; report?: Report | null }
 type Incident = {
   incident_id: string; stream_id: string; category: string; status: string
   operational_status: string
@@ -139,6 +139,7 @@ export default function EventDrivenMonitor() {
   const [run, setRun] = useState<Run | null>(null)
   const [events, setEvents] = useState<StreamEvent[]>([])
   const [incidents, setIncidents] = useState<IncidentView[]>([])
+  const [queue, setQueue] = useState<{queued: number; running: number; pending_followups: number; oldest_wait_seconds: number | null} | null>(null)
   const [health, setHealth] = useState<Health | null>(null)
   const [alertLevel, setAlertLevel] = useState<AlertLevel>('high')
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
@@ -146,6 +147,8 @@ export default function EventDrivenMonitor() {
   })
   const [busy, setBusy] = useState(false)
   const [controlBusy, setControlBusy] = useState(false)
+  const [investigatingIds, setInvestigatingIds] = useState<Set<string>>(new Set())
+  const investigationRequests = useRef(new Set<string>())
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState('')
   const lastSequence = useRef(0)
@@ -255,7 +258,7 @@ export default function EventDrivenMonitor() {
       const views = await Promise.all(found.map(async (incident): Promise<IncidentView> => {
         const detail = await jsonRequest<Incident>(`/api/incidents/${encodeURIComponent(incident.incident_id)}`)
         const latestJob = detail.investigations.at(-1)
-        const completed = [...detail.investigations].reverse().find((job) => job.status === 'completed')
+        const completed = detail.investigations.filter((job) => job.status === 'completed').sort((a, b) => (b.revision ?? 0) - (a.revision ?? 0))[0]
         const [latest, lastReport] = await Promise.all([
           latestJob ? jsonRequest<Job>(`/api/jobs/${encodeURIComponent(latestJob.job_id)}`) : Promise.resolve(undefined),
           completed && completed.job_id !== latestJob?.job_id
@@ -273,6 +276,13 @@ export default function EventDrivenMonitor() {
     const timer = window.setInterval(() => void refreshIncidents(), 2200)
     return () => window.clearInterval(timer)
   }, [refreshIncidents])
+
+  useEffect(() => {
+    const refresh = () => { void jsonRequest<{queued: number; running: number; pending_followups: number; oldest_wait_seconds: number | null}>('/api/investigation-queue').then(setQueue).catch(() => undefined) }
+    refresh()
+    const timer = window.setInterval(refresh, 2200)
+    return () => window.clearInterval(timer)
+  }, [])
 
   const observations = useMemo(() => events.filter((item) => item.event_type === 'window_observation'), [events])
   const latestObservation = observations.at(-1)
@@ -369,6 +379,9 @@ export default function EventDrivenMonitor() {
   }
 
   async function investigate(incident: Incident) {
+    if (investigationRequests.current.has(incident.incident_id)) return
+    investigationRequests.current.add(incident.incident_id)
+    setInvestigatingIds(new Set(investigationRequests.current))
     try {
       setError('')
       await jsonRequest(`/api/incidents/${encodeURIComponent(incident.incident_id)}/investigations`, {
@@ -378,6 +391,7 @@ export default function EventDrivenMonitor() {
       })
       await refreshIncidents()
     } catch (issue) { setError(issue instanceof Error ? issue.message : 'Could not start the investigation.') }
+    finally { investigationRequests.current.delete(incident.incident_id); setInvestigatingIds(new Set(investigationRequests.current)) }
   }
 
   function episodeNumbers(incident: Incident) {
@@ -488,6 +502,7 @@ export default function EventDrivenMonitor() {
 
       <section className="incident-stream" aria-label="Alert and investigation updates">
         <div className="section-kicker">ALERTS AND INVESTIGATIONS</div>
+        {queue && <p className="incident-status-note">Investigation queue: {queue.running} running · {queue.queued} waiting{queue.oldest_wait_seconds !== null ? ` · oldest waiting ${queue.oldest_wait_seconds}s` : ''}{queue.pending_followups ? ` · ${queue.pending_followups} follow-up evidence pending` : ''}</p>}
         {!run && <p className="stream-empty">Start a replay to watch ticket counts and automatic investigations.</p>}
         {run && incidents.length === 0 && <p className="stream-empty">{run.status === 'completed' ? 'Replay complete · no alert episodes were emitted.' : 'No alert episodes yet. The detector is watching each completed window.'}</p>}
         {incidents.map(({ incident, latestJob, lastReport }) => {
@@ -512,15 +527,16 @@ export default function EventDrivenMonitor() {
             {additionalChecks.length > 0 && <details className="alert-detector-details"><summary>Alert details</summary><p>Additional rate checks crossed their cutoffs: {additionalChecks.map((name) => detectorNames[name] ?? name).join(', ')}.</p></details>}
             <div className="investigation-state" aria-live="polite">
               {latestJob?.status === 'queued' && <><strong>Investigation queued</strong><span>Waiting for the investigator to start.</span></>}
-              {latestJob?.status === 'running' && <><strong>Investigation started automatically</strong><span>Comparing tickets, service logs, changes, and operating guides…</span><span>Evidence available through {formatTime(latestJob.cutoff)}</span></>}
+              {latestJob?.status === 'running' && <><strong>Investigation in progress</strong><span>Comparing tickets, service logs, changes, and operating guides…</span><span>Evidence available through {formatTime(latestJob.cutoff)}</span></>}
               {latestJob?.status === 'failed' && <><strong>Investigation could not complete</strong><span>{latestJob.error ?? latestJob.reason}</span></>}
               {latestJob?.status === 'blocked' && <><strong>Investigation stopped for review</strong><span>{latestJob.error ?? 'Review before retrying to avoid an unintentional provider call.'}</span></>}
               {latestJob?.status === 'completed' && <span>Investigation completed · Evidence through {formatTime(latestJob.cutoff)}</span>}
               {!latestJob && currentRunMode === 'manual' && <><strong>Alert recorded</strong><span>Manual mode · investigation is waiting for an operator.</span></>}
               {!latestJob && currentRunMode === 'automatic' && <><strong>Investigation is starting</strong><span>Preparing evidence for this alert.</span></>}
             </div>
-            {!latestJob && currentRunMode === 'manual' && <button className="primary-button" onClick={() => void investigate(incident)}>Investigate now</button>}
-            {latestJob?.status === 'failed' && <button className="secondary-button" onClick={() => void investigate(incident)}>Retry investigation</button>}
+            {!latestJob && currentRunMode === 'manual' && <button className="primary-button" disabled={investigatingIds.has(incident.incident_id)} onClick={() => void investigate(incident)}>Investigate now</button>}
+            {latestJob?.status === 'failed' && <button className="secondary-button" disabled={investigatingIds.has(incident.incident_id)} onClick={() => void investigate(incident)}>Retry investigation</button>}
+            {latestJob?.status === 'completed' && <button className="secondary-button" disabled={investigatingIds.has(incident.incident_id)} onClick={() => void investigate(incident)}>Investigate update</button>}
             {report && <section className="monitor-report"><div className="section-kicker">REPORT</div><h3>{report.hypotheses?.[0]?.title ?? (report.status === 'abstained' ? 'Not enough evidence to explain the alert' : 'Investigation findings')}</h3>
               <p>{report.summary}</p>
               {recommendation && <section className="monitor-recommendation">

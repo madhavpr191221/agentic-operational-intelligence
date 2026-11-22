@@ -71,6 +71,14 @@ class AgentToolContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("operational_docs", parsed["results"])
                 search_tickets.assert_called_once()
                 search_docs.assert_called_once()
+                for hours in (6, 24):
+                    output = await search_tool.on_invoke_tool(context, json.dumps({
+                        "category": "payments", "query": "authorization timeout",
+                        "sources": ["customer_tickets"], "limit": 5,
+                        "lookback_hours": hours, "expansion_reason": "The origin of timeouts remains unknown.",
+                    }))
+                    parsed = json.loads(output)
+                    self.assertEqual(parsed["recent_start"], "2025-12-31T22:00:00Z" if hours == 6 else "2025-12-31T04:00:00Z")
 
         actual = {tool.name for tool in captured["tools"]}
         self.assertEqual(actual, expected)

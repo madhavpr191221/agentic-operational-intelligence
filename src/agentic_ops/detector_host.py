@@ -79,6 +79,36 @@ class DetectorHost:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(incidents)")}
             if "operational_status" not in columns:
                 db.execute("ALTER TABLE incidents ADD COLUMN operational_status TEXT NOT NULL DEFAULT 'open'")
+            job_columns = {row["name"] for row in db.execute("PRAGMA table_info(incident_jobs)")}
+            for name, declaration in (
+                ("attempt_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("lease_until", "TEXT"), ("fence_token", "INTEGER NOT NULL DEFAULT 0"),
+                ("queue_order", "INTEGER"), ("queued_at", "TEXT"), ("completed_at", "TEXT"),
+                ("automatic_followup", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if name not in job_columns:
+                    db.execute(f"ALTER TABLE incident_jobs ADD COLUMN {name} {declaration}")
+            db.execute("CREATE TABLE IF NOT EXISTS investigation_queue_order "
+                       "(sequence INTEGER PRIMARY KEY AUTOINCREMENT)")
+            for job in db.execute("SELECT job_id FROM incident_jobs WHERE queue_order IS NULL ORDER BY created_at,rowid").fetchall():
+                order = db.execute("INSERT INTO investigation_queue_order DEFAULT VALUES").lastrowid
+                db.execute("UPDATE incident_jobs SET queue_order=? WHERE job_id=?", (order, job["job_id"]))
+            db.execute("UPDATE incident_jobs SET queued_at=created_at WHERE queued_at IS NULL")
+            db.execute("UPDATE incident_jobs SET completed_at=? WHERE status='completed' AND completed_at IS NULL", (utc_now(),))
+            db.execute("CREATE TABLE IF NOT EXISTS pending_investigation_followups ("
+                       "incident_id TEXT PRIMARY KEY, stream_id TEXT NOT NULL, cutoff TEXT NOT NULL, "
+                       "sequence_bound INTEGER NOT NULL, episode_json TEXT NOT NULL, event_id TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS incident_report_revisions ("
+                       "incident_id TEXT NOT NULL, revision INTEGER NOT NULL, job_id TEXT NOT NULL UNIQUE, "
+                       "PRIMARY KEY (incident_id,revision), FOREIGN KEY (job_id) REFERENCES incident_jobs(job_id))")
+            old_reports = db.execute("SELECT job_id,incident_id FROM incident_jobs WHERE status='completed' "
+                                     "AND report_json IS NOT NULL AND job_id NOT IN "
+                                     "(SELECT job_id FROM incident_report_revisions) ORDER BY created_at,rowid").fetchall()
+            for report in old_reports:
+                revision = db.execute("SELECT COALESCE(MAX(revision),0)+1 FROM incident_report_revisions WHERE incident_id=?",
+                                      (report["incident_id"],)).fetchone()[0]
+                db.execute("INSERT INTO incident_report_revisions VALUES (?,?,?)",
+                           (report["incident_id"], revision, report["job_id"]))
             db.execute("CREATE TABLE IF NOT EXISTS applied_episode_events ("
                        "event_id TEXT PRIMARY KEY, stream_id TEXT NOT NULL, applied_at TEXT NOT NULL)")
             # Older hosts already committed these deliveries with their effects.
@@ -211,10 +241,12 @@ class DetectorHost:
                         job_id = _id("incident-job", event["episode_id"], event["event_id"])
                         db.execute(
                             "INSERT OR IGNORE INTO incident_jobs "
-                            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                            "(job_id,incident_id,stream_id,reason,cutoff,sequence_bound,episode_json,status,created_at,report_json,error,queue_order,queued_at) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             (job_id, event["episode_id"], self.stream_id, "initial alert",
                              json.loads(alert["payload_json"])["window_end"], alert["sequence"],
-                             _json(event["episode"]), "queued", utc_now(), None, None),
+                             _json(event["episode"]), "queued", utc_now(), None, None,
+                             db.execute("INSERT INTO investigation_queue_order DEFAULT VALUES").lastrowid, utc_now()),
                         )
                 else:
                     updated = db.execute("UPDATE incidents SET status=?,latest_window_end=?,last_event_id=?,episode_json=? "
@@ -225,7 +257,7 @@ class DetectorHost:
                                           event["episode_id"], self.stream_id, event["category"]))
                     if updated.rowcount != 1:
                         raise ValueError("Cannot update an unknown episode")
-                    if automatic and event["event_type"] == "episode_updated":
+                    if automatic and event["event_type"] in {"episode_updated", "episode_ended"}:
                         self._queue_material_followup(db, event)
                 db.execute("INSERT INTO applied_episode_events (event_id,stream_id,applied_at) VALUES (?,?,?)",
                            (event["event_id"], self.stream_id, utc_now()))
@@ -243,7 +275,7 @@ class DetectorHost:
         """Queue at most one follow-up per window when linked evidence changes materially."""
         category = event["category"]
         service = {"payments": "checkout-payments", "orders": "orders-api",
-                   "delivery": "delivery-api"}.get(category)
+                   "delivery": "delivery-api", "account": "account-api"}.get(category)
         if service is None:
             return
         window = event["window"]
@@ -255,13 +287,12 @@ class DetectorHost:
         ).fetchone()
         if latest_job and latest_job["cutoff"] >= end:
             return
-        if latest_job and latest_job["status"] in {"queued", "running"}:
-            return
-
         current = db.execute(
-            "SELECT source,payload_json FROM events WHERE run_id=? AND simulated_at>=? AND simulated_at<? "
+            "SELECT source,payload_json FROM events WHERE run_id=? "
+            "AND COALESCE(json_extract(payload_json,'$.available_at'),simulated_at)>=? "
+            "AND COALESCE(json_extract(payload_json,'$.available_at'),simulated_at)<? AND simulated_at<? "
             "AND source IN ('product_logs','issue_tracker','change_log') ORDER BY sequence",
-            (self.stream_id, start, end),
+            (self.stream_id, start, end, end),
         ).fetchall()
         relevant: list[dict[str, Any]] = []
         current_logs: list[dict[str, Any]] = []
@@ -274,7 +305,28 @@ class DetectorHost:
             else:
                 relevant.append(payload)
 
-        changed = bool(relevant)
+        changed = False
+        for payload in relevant:
+            # Issue events count when their status changes; repeated copies of
+            # an unchanged issue or change record are not new evidence.
+            key = payload.get("issue_key") or payload.get("change_key")
+            if not key:
+                continue
+            key_field = "issue_key" if payload.get("issue_key") else "change_key"
+            source = "issue_tracker" if key_field == "issue_key" else "change_log"
+            previous = db.execute(
+                "SELECT payload_json FROM events WHERE run_id=? AND source=? AND simulated_at<? "
+                "AND COALESCE(json_extract(payload_json,'$.available_at'),simulated_at)<? "
+                f"AND json_extract(payload_json,'$.{key_field}')=? ORDER BY simulated_at DESC,sequence DESC LIMIT 1",
+                (self.stream_id, source, start, start, key),
+            ).fetchone()
+            if previous is None:
+                changed = True
+            elif source == "issue_tracker":
+                old = json.loads(previous["payload_json"])
+                changed = changed or old.get("status") != payload.get("status")
+            else:
+                changed = changed or json.loads(previous["payload_json"]) != payload
         for payload in current_logs:
             requests = int(payload.get("requests") or 0)
             errors = int(payload.get("errors") or 0)
@@ -283,13 +335,16 @@ class DetectorHost:
                 degraded = error_rate >= 0.10
             elif service == "orders-api":
                 degraded = int(payload.get("queue_depth") or 0) > 100 or error_rate >= 0.10
-            else:
+            elif service == "delivery-api":
                 degraded = int(payload.get("p95_latency_ms") or 0) >= 1000 or error_rate >= 0.10
+            else:
+                degraded = error_rate >= 0.10
             previous = db.execute(
                 "SELECT payload_json FROM events WHERE run_id=? AND source='product_logs' "
                 "AND event_type='service_log_summary' AND simulated_at<? "
+                "AND COALESCE(json_extract(payload_json,'$.available_at'),simulated_at)<? "
                 "AND json_extract(payload_json,'$.service')=? ORDER BY simulated_at DESC,sequence DESC LIMIT 1",
-                (self.stream_id, start, service),
+                (self.stream_id, start, start, service),
             ).fetchone()
             if previous:
                 old = json.loads(previous["payload_json"])
@@ -299,26 +354,45 @@ class DetectorHost:
                     was_degraded = old_rate >= 0.10
                 elif service == "orders-api":
                     was_degraded = int(old.get("queue_depth") or 0) > 100 or old_rate >= 0.10
-                else:
+                elif service == "delivery-api":
                     was_degraded = int(old.get("p95_latency_ms") or 0) >= 1000 or old_rate >= 0.10
+                else:
+                    was_degraded = old_rate >= 0.10
                 changed = changed or (was_degraded != degraded)
             elif degraded:
                 changed = True
         if not changed:
             return
-        reason = "Relevant service or issue update"
-        self._insert_coordinator_job(db, event, reason, end)
-
-    def _insert_coordinator_job(self, db: sqlite3.Connection, event: dict[str, Any],
-                                reason: str, cutoff: str) -> None:
-        incident_id = event["episode_id"]
         sequence = db.execute("SELECT COALESCE(MAX(sequence),0) FROM events WHERE run_id=?",
                               (self.stream_id,)).fetchone()[0]
-        job_id = _id("incident-job", incident_id, event["event_id"], reason)
-        db.execute("INSERT OR IGNORE INTO incident_jobs "
-                   "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                   (job_id, incident_id, self.stream_id, reason, cutoff, sequence,
-                    _json(event["episode"]), "queued", utc_now(), None, None))
+        db.execute("INSERT INTO pending_investigation_followups "
+                   "(incident_id,stream_id,cutoff,sequence_bound,episode_json,event_id) VALUES (?,?,?,?,?,?) "
+                   "ON CONFLICT(incident_id) DO UPDATE SET cutoff=excluded.cutoff, "
+                   "sequence_bound=excluded.sequence_bound,episode_json=excluded.episode_json,event_id=excluded.event_id "
+                   "WHERE excluded.cutoff > pending_investigation_followups.cutoff",
+                   (episode_id, self.stream_id, end, sequence, _json(event["episode"]), event["event_id"]))
+
+    def observe_completed_window(self, observation: CountObservation, automatic: bool) -> None:
+        """Watch the latest episode per category for evidence, even after it ends."""
+        if not automatic:
+            return
+        with self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute("SELECT * FROM incidents WHERE stream_id=? ORDER BY opened_at DESC,rowid DESC",
+                              (self.stream_id,)).fetchall()
+            seen: set[str] = set()
+            for incident in rows:
+                category = incident["category"]
+                if category in seen:
+                    continue
+                seen.add(category)
+                if observation.window_start < incident["opened_at"]:
+                    continue
+                event = {"category": category, "episode_id": incident["incident_id"],
+                         "event_id": _id("evidence-window", incident["incident_id"], observation.window_index),
+                         "episode": json.loads(incident["episode_json"]),
+                         "window": {"window_start": observation.window_start, "window_end": observation.window_end}}
+                self._queue_material_followup(db, event)
 
 
 def list_incidents(store: EventStore, stream_id: str | None = None) -> list[dict[str, Any]]:

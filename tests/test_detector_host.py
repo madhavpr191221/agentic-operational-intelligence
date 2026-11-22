@@ -172,6 +172,24 @@ class DetectorHostTests(unittest.TestCase):
             with store._connection() as db:
                 self.assertEqual(db.execute("SELECT count(*) FROM incident_jobs").fetchone()[0], 0)
 
+    def test_material_service_change_after_episode_ends_is_retained(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EventStore(Path(tmp) / "events.sqlite")
+            run_id = store.create_run("payment_issue", 1, "poisson", {})
+            host = DetectorHost(store, run_id, CategoryDetectorSuite("poisson", 4, ["payments"]))
+            episode = '{"category":"payments","start_window":4,"latest_window":4}'
+            with store._connection() as db:
+                db.execute("INSERT INTO incidents (incident_id,stream_id,category,status,opened_at,latest_window_end,last_event_id,episode_json) "
+                           "VALUES (?,?,?,?,?,?,?,?)", ("incident", run_id, "payments", "ended", "004", "005", "event", episode))
+                db.execute("INSERT INTO incident_jobs (job_id,incident_id,stream_id,reason,cutoff,sequence_bound,episode_json,status,created_at) "
+                           "VALUES (?,?,?,?,?,?,?,?,?)", ("job", "incident", run_id, "initial alert", "005", 1, episode, "completed", "now"))
+            store.add_event(run_id, "005", "product_logs", "service_log_summary", {"service": "checkout-payments", "requests": 100, "errors": 1})
+            store.add_event(run_id, "006", "product_logs", "service_log_summary", {"service": "checkout-payments", "requests": 100, "errors": 20})
+            host.observe_completed_window(observation(6, 4), automatic=True)
+            with store._connection() as db:
+                pending = db.execute("SELECT * FROM pending_investigation_followups WHERE incident_id='incident'").fetchone()
+                self.assertEqual(pending["cutoff"], "007")
+
 
 if __name__ == "__main__":
     unittest.main()

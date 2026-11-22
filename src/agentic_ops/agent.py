@@ -8,6 +8,7 @@ import os
 import re
 import threading
 from collections.abc import Callable
+from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from agents import Agent, Runner, function_tool
@@ -160,6 +161,8 @@ class MockInvestigator(Investigator):
                                              "end_window_index": end_index},
                  lambda: evidence_tools.compare_ticket_themes(run_id, category, start_index, end_index)),
             ]
+            if evidence_tools.past_only_focus:
+                analyses = [item for item in analyses if item[0] != "compare_categories"]
             for name, arguments, invoke in analyses:
                 result = invoke()
                 category_outputs[name] = result
@@ -337,9 +340,20 @@ class OpenAIInvestigator(Investigator):
             "and investigation time bounds; document search uses hybrid keyword and semantic retrieval."))
         def search_evidence(category: str, query: str,
                             sources: list[Literal["customer_tickets", "issues", "changes", "operational_docs"]],
-                            limit: int = 5) -> str:
+                            limit: int = 5, lookback_hours: Literal[6, 24] | None = None,
+                            expansion_reason: str = "") -> str:
             """Search selected evidence sources with one short symptom or service query."""
             episode = validate_selection(category)
+            if lookback_hours is not None:
+                if not expansion_reason.strip():
+                    raise ValueError("Explain the material unanswered question before widening the search.")
+                previous = int(episode.get("expanded_lookback_hours", 0))
+                if lookback_hours == 24 and previous < 6:
+                    raise ValueError("Search the six-hour range before expanding to 24 hours.")
+                if lookback_hours > previous:
+                    end = datetime.fromisoformat(str(episode["analysis_end_at"]).replace("Z", "+00:00"))
+                    episode["context_start_at"] = (end - timedelta(hours=lookback_hours)).isoformat().replace("+00:00", "Z")
+                    episode["expanded_lookback_hours"] = lookback_hours
             allowed_sources = {"customer_tickets", "issues", "changes", "operational_docs"}
             if not sources or any(source not in allowed_sources for source in sources):
                 raise ValueError("Choose one or more supported evidence source groups.")
@@ -371,12 +385,14 @@ class OpenAIInvestigator(Investigator):
                         unavailable[source] = str(exc)
                 total = sum(int(result.get("count", 0)) for result in results.values())
                 return {"category": category, "query": query,
-                        "available_through": episode["analysis_end_at"], "count": total,
+                        "available_through": episode["analysis_end_at"], "recent_start": episode["context_start_at"],
+                        "expansion_reason": expansion_reason if lookback_hours else None, "count": total,
                         "archive_index_ready": evidence_tools.corpus.ready,
                         "results": results, "unavailable_sources": unavailable}
 
             return run_tool("search_evidence", {"category": category, "query": query,
-                            "sources": selected_sources, "limit": limit}, search_selected_sources)
+                            "sources": selected_sources, "limit": limit, "lookback_hours": lookback_hours,
+                            "expansion_reason": expansion_reason}, search_selected_sources)
 
         @function_tool(name_override="query_service_health", description_override=(
             "Inspect structured service error counts and rates around the selected focus group, "
@@ -425,20 +441,18 @@ class OpenAIInvestigator(Investigator):
                             "start_window_index": start_index, "end_window_index": end_index}, analyze_tickets)
 
         @function_tool(name_override="compare_incident_context", description_override=(
-            "Compare category counts across the episode and compare the selected category with its "
-            "equal-duration prior period."))
+            "Compare the selected category with its equal-duration prior period."))
         def compare_incident_context(category: str) -> str:
             episode = validate_selection(category)
             start_index = int(episode["start_window_index"])
             end_index = int(episode["end_window_index"])
 
             def compare_context() -> dict[str, Any]:
-                return {
-                    "category_comparison": evidence_tools.compare_categories(
-                        run_id, start_index, end_index),
-                    "before_after": evidence_tools.compare_before_after(
-                        run_id, category, start_index, end_index),
-                }
+                result = {"before_after": evidence_tools.compare_before_after(
+                    run_id, category, start_index, end_index)}
+                if not evidence_tools.past_only_focus:
+                    result["category_comparison"] = evidence_tools.compare_categories(run_id, start_index, end_index)
+                return result
 
             return run_tool("compare_incident_context", {"category": category,
                             "start_window_index": start_index, "end_window_index": end_index}, compare_context)
@@ -482,18 +496,19 @@ class OpenAIInvestigator(Investigator):
                 "The signals already contain the detector outputs; do not recompute statistics. Interpret Z-score, "
                 "CUSUM, and log-likelihood ratio as distinct detector evidence, not values to add together. "
                 "Use the supplied episode summary for the full episode trend and equal-duration baseline as context. "
-                "The primary local inference must consider the selected 30-minute window together with up to two preceding available windows and one following window when available. Analyze this group together, in chronological order; the selected window is the focus. At the end of a run, do not invent a future window. Use the per-window UTC bounds, counts, expected values, and service summaries from analyze_focus_window and the episode summary. "
+                "For an event-driven episode investigation, consider the selected 30-minute alert window and up to two preceding available windows. Never include a later window in this focus group. Use the per-window UTC bounds, counts, expected values, and service summaries from analyze_focus_window and the episode summary. "
                 "Do not diagnose each window independently. If fewer windows exist at a run boundary, reason from the available group and state its exact time range. "
                 "Evidence outside the selected focus group, including older logs and open issues, may support or qualify the finding, but explicitly treat it as additional context rather than evidence inside the focus group. "
                 "Search evidence within the selected episode and its preceding context; active issues may predate that context. "
+                "Start recent ticket and service searches at the alert window and two preceding windows. If a material question remains unanswered, use search_evidence with lookback_hours=6 and explain why; expand to 24 hours only after the six-hour search and only when justified. Older persistent issues, changes and reference documents may be searched separately by relevance. "
                 "For each selected category, search relevant text sources with search_evidence and include at least one focused "
                 "operational_docs search using a customer symptom or service name. This ensures relevant guides and runbooks "
                 "are checked rather than assumed. State when the archive index is unavailable or no passages match. Inspect structured "
                 "service metrics with query_service_health; compare ticket themes and contributors with "
-                "analyze_customer_tickets; compare the episode with other categories and its prior period using "
+                "analyze_customer_tickets; compare the episode with its prior period using "
                 "compare_incident_context; and build a timeline with build_incident_timeline. Search operational "
                 "documents before calling get_runbook_guidance, and pass only evidence IDs returned earlier. The "
-                "selected signal already contains chronological T-2, T-1, T, and available T+1 window details; use "
+                "selected signal contains chronological T-2, T-1, and T window details; use "
                 "exact UTC intervals and distinguish focus-group evidence from broader episode context. All dated "
                 "material must be available by the selected investigation cutoff. Make a targeted follow-up only to "
                 "resolve a named uncertainty. These deterministic tools do not recompute detector statistics. "

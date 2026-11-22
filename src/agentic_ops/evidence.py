@@ -17,8 +17,9 @@ class EvidenceTools:
     }
 
     def __init__(self, store: EventStore, retriever: HybridRetriever | None = None,
-                 corpus: CorpusSearch | None = None):
+                 corpus: CorpusSearch | None = None, past_only_focus: bool = False):
         self.store = store
+        self.past_only_focus = past_only_focus
         models = retriever.models if retriever is not None and retriever.models is not None else LocalRAGModels()
         self.retriever = retriever or HybridRetriever(store, models=models)
         self.corpus = corpus or CorpusSearch(models=models)
@@ -62,13 +63,12 @@ class EvidenceTools:
                                       service=service)
         return self._rank(self._dedupe([*records, *archived]), query, limit)
 
-    @staticmethod
-    def _focus_indices(observations_by_index: dict[int, dict[str, Any]],
+    def _focus_indices(self, observations_by_index: dict[int, dict[str, Any]],
                        focus_window_index: int) -> list[int]:
-        """Return available windows from T-2 through T+1, in chronological order."""
+        """Return the available focus windows in chronological order."""
         if focus_window_index not in observations_by_index:
             return []
-        return [index for index in range(max(0, focus_window_index - 2), focus_window_index + 2)
+        return [index for index in range(max(0, focus_window_index - 2), focus_window_index + (1 if self.past_only_focus else 2))
                 if index in observations_by_index]
 
     def build_episode_summary(self, run_id: str, category: str, start_window_index: int,
@@ -110,7 +110,7 @@ class EvidenceTools:
         context_start_at = (datetime.fromisoformat(start_at.replace("Z", "+00:00")) - timedelta(hours=6))
         context_start_at = context_start_at.isoformat().replace("+00:00", "Z")
         change_start_at = (datetime.fromisoformat(start_at.replace("Z", "+00:00")) - timedelta(hours=48))
-        change_start_at = change_start_at.isoformat().replace("+00:00", "Z")
+        change_start_at = None if self.past_only_focus else change_start_at.isoformat().replace("+00:00", "Z")
 
         baseline_indices = list(range(start_window_index - len(episode_indices), start_window_index))
         baseline_indices = [index for index in baseline_indices if index in observation_by_index]
@@ -140,6 +140,8 @@ class EvidenceTools:
             raise ValueError("Selected focus window is unavailable in the stored run data.")
         focus_start_at = observation_by_index[focus_indices[0]]["payload"]["window_start"] if focus_indices else start_at
         focus_end_at = observation_by_index[focus_indices[-1]]["payload"]["window_end"] if focus_indices else end_at
+        if self.past_only_focus:
+            context_start_at = str(focus_start_at)
         analysis_end_at = max(end_at, str(focus_end_at))
         logs = self.store.search_events(run_id, ("product_logs",), service, 1000,
                                         ("service_log_summary",), log_query_start, analysis_end_at)
@@ -203,7 +205,7 @@ class EvidenceTools:
     def analyze_focus_window(self, run_id: str, category: str, focus_window_index: int,
                              start_window_index: int | None = None,
                              end_window_index: int | None = None) -> dict[str, Any]:
-        """Analyze available windows from T-2 through T+1 in chronological order."""
+        """Analyze the selected focus group in chronological order."""
         observations = self.store.search_events(run_id, ("detector",), limit=1000,
                                                 event_types=("window_observation",))
         observations_by_index = {int(item["payload"]["window_index"]): item for item in observations}
@@ -214,6 +216,8 @@ class EvidenceTools:
                     "available_windows": 0, "windows": [], "evidence": []}
         requested_start = (start_window_index if start_window_index is not None else default_indices[0])
         requested_end = (end_window_index if end_window_index is not None else default_indices[-1])
+        if self.past_only_focus and (requested_start < max(0, focus_window_index - 2) or requested_end > focus_window_index):
+            raise ValueError("The focus group must contain only the alert window and up to two preceding windows.")
         window_indices = [index for index in range(requested_start, requested_end + 1)
                           if index in observations_by_index]
         if focus_window_index not in window_indices:
@@ -360,6 +364,11 @@ class EvidenceTools:
                                            "", 1000, start_at=start_at, end_at=end_at)
         records = [item for item in records if item["source"] != "support_tickets"
                    or item["payload"].get("category") == category]
+        if self.past_only_focus:
+            service = self._SERVICE_BY_CATEGORY.get(category)
+            records = [item for item in records if item["source"] == "support_tickets"
+                       or item["payload"].get("category") == category
+                       or (not item["payload"].get("category") and item["payload"].get("service") == service)]
         ranked = self._rank_with_corpus(records, query, limit,
                                         ("support_tickets", "issue_tracker", "change_log"),
                                         category, start_at, end_at)

@@ -39,9 +39,10 @@ class ApiTests(unittest.TestCase):
                                "(incident_id,stream_id,category,status,opened_at,latest_window_end,last_event_id,episode_json) "
                                "VALUES (?,?,?,?,?,?,?,?)",
                                ("incident", "stream", "payments", "ended", "001", "002", "event", "{}"))
-                    db.execute("INSERT INTO incident_jobs VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    db.execute("INSERT INTO incident_jobs (job_id,incident_id,stream_id,reason,cutoff,sequence_bound,episode_json,status,created_at,report_json,error) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                                ("job", "incident", "stream", "initial alert", "002", 1, "{}", "completed",
                                 "now", '{"summary":"saved"}', None))
+                    db.execute("INSERT INTO incident_report_revisions VALUES (?,?,?)", ("incident", 1, "job"))
                 client = TestClient(create_app(runtime))
                 detail = client.get("/api/incidents/incident").json()
                 self.assertEqual((detail["status"], detail["operational_status"]), ("ended", "open"))
