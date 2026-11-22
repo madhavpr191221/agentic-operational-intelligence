@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 from agentic_ops.detection import CategoryDetectorSuite, CountObservation
@@ -37,6 +38,7 @@ class DetectorHostTests(unittest.TestCase):
             incidents = list_incidents(store, "restarted")
             self.assertEqual(len(incidents), 2)
             self.assertEqual({item["status"] for item in incidents}, {"active", "ended"})
+            self.assertEqual({item["operational_status"] for item in incidents}, {"open"})
 
     def test_opened_episode_and_initial_job_are_delivered_atomically(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -72,6 +74,103 @@ class DetectorHostTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 host.process(CountObservation(1, "001", "002", {}))
             host.process(observation(1, 4))
+
+    def test_automatic_episode_end_does_not_queue_final_job_and_redelivery_is_safe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EventStore(Path(tmp) / "events.sqlite")
+            run_id = store.create_run("payment_issue", 1, "poisson", {})
+            host = DetectorHost(store, run_id, CategoryDetectorSuite("poisson", 4, ["payments"]))
+            first_episode = None
+            ended = False
+            for index, count in enumerate([4, 4, 4, 4, 40, 45] + [0] * 50 + [40]):
+                item = observation(index, count)
+                result = host.process(item)
+                for event in host.pending_events():
+                    if event["event_type"] in {"episode_opened", "episode_updated"}:
+                        store.add_event(run_id, item.window_end, "detector", "anomaly_alert",
+                                        {"category": "payments", "window_index": index,
+                                         "window_end": item.window_end})
+                    if event["event_type"] == "episode_opened" and first_episode is None:
+                        first_episode = event["episode_id"]
+                    if event["event_type"] == "episode_ended" and event["episode_id"] == first_episode:
+                        ended = True
+                host.deliver_pending(automatic=True)
+                self.assertIsNotNone(result)
+            self.assertTrue(ended)
+            incidents = list_incidents(store, run_id)
+            first = next(item for item in incidents if item["incident_id"] == first_episode)
+            self.assertEqual((first["status"], first["operational_status"]), ("ended", "open"))
+            self.assertEqual(len(incidents), 2)
+            with store._connection() as db:
+                jobs = db.execute("SELECT * FROM incident_jobs WHERE stream_id=?", (run_id,)).fetchall()
+                self.assertEqual([job["reason"] for job in jobs], ["initial alert", "initial alert"])
+                old_event = db.execute("SELECT event_id FROM episode_outbox WHERE episode_id=? "
+                                       "AND event_type='episode_updated' LIMIT 1", (first_episode,)).fetchone()
+                self.assertIsNotNone(old_event)
+                db.execute("UPDATE episode_outbox SET delivered_at=NULL WHERE event_id=?", (old_event["event_id"],))
+            restarted = DetectorHost(store, run_id, CategoryDetectorSuite("poisson", 4, ["payments"]))
+            self.assertEqual(restarted.deliver_pending(automatic=True), 1)
+            after = next(item for item in list_incidents(store, run_id) if item["incident_id"] == first_episode)
+            self.assertEqual(after["status"], "ended")
+            self.assertEqual(after["last_event_id"], first["last_event_id"])
+            self.assertEqual(after["episode"], first["episode"])
+
+    def test_legacy_incident_migration_preserves_reports_and_is_repeatable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EventStore(Path(tmp) / "legacy.sqlite")
+            with store._connection() as db:
+                db.executescript("""
+                    CREATE TABLE incidents (incident_id TEXT PRIMARY KEY, stream_id TEXT NOT NULL,
+                        category TEXT NOT NULL, status TEXT NOT NULL, opened_at TEXT NOT NULL,
+                        latest_window_end TEXT NOT NULL, last_event_id TEXT NOT NULL, episode_json TEXT NOT NULL);
+                    CREATE TABLE incident_jobs (job_id TEXT PRIMARY KEY, incident_id TEXT NOT NULL,
+                        stream_id TEXT NOT NULL, reason TEXT NOT NULL, cutoff TEXT NOT NULL,
+                        sequence_bound INTEGER NOT NULL, episode_json TEXT NOT NULL, status TEXT NOT NULL,
+                        created_at TEXT NOT NULL, report_json TEXT, error TEXT);
+                """)
+                db.execute("INSERT INTO incidents VALUES (?,?,?,?,?,?,?,?)",
+                           ("old", "stream", "payments", "ended", "001", "002", "event", "{}"))
+                db.execute("INSERT INTO incident_jobs VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                           ("job", "old", "stream", "initial alert", "002", 1, "{}", "completed",
+                            "now", json.dumps({"summary": "saved"}), None))
+            for _ in range(2):
+                DetectorHost(store, "stream", CategoryDetectorSuite("poisson", 4, ["payments"]))
+            incident = list_incidents(store, "stream")[0]
+            self.assertEqual((incident["status"], incident["operational_status"]), ("ended", "open"))
+            with store._connection() as db:
+                self.assertEqual(json.loads(db.execute("SELECT report_json FROM incident_jobs WHERE job_id='job'").fetchone()[0]),
+                                 {"summary": "saved"})
+
+    def test_delivery_failure_rolls_back_incident_and_can_be_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EventStore(Path(tmp) / "events.sqlite")
+            run_id = store.create_run("payment_issue", 1, "poisson", {})
+            host = DetectorHost(store, run_id, CategoryDetectorSuite("poisson", 4, ["payments"]))
+            for index, count in enumerate([4, 4, 4, 4, 40]):
+                host.process(observation(index, count))
+            with self.assertRaisesRegex(ValueError, "alert evidence"):
+                host.deliver_pending(automatic=True)
+            self.assertEqual(list_incidents(store, run_id), [])
+            self.assertEqual(len(host.pending_events()), 1)
+            store.add_event(run_id, "005", "detector", "anomaly_alert",
+                            {"category": "payments", "window_index": 4, "window_end": "005"})
+            restarted = DetectorHost(store, run_id, CategoryDetectorSuite("poisson", 4, ["payments"]))
+            self.assertEqual(restarted.deliver_pending(automatic=True), 1)
+            self.assertEqual(len(list_incidents(store, run_id)), 1)
+
+    def test_categories_keep_separate_incidents_and_manual_mode_has_no_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EventStore(Path(tmp) / "events.sqlite")
+            host = DetectorHost(store, "stream", CategoryDetectorSuite("poisson", 4, ["payments", "orders"]))
+            for index, counts in enumerate([(4, 4)] * 4 + [(40, 4), (40, 40)] + [(0, 40)] * 5):
+                host.process(CountObservation(index, f"{index:03}", f"{index + 1:03}",
+                                              {"payments": counts[0], "orders": counts[1]}))
+                host.deliver_pending(automatic=False)
+            incidents = list_incidents(store, "stream")
+            self.assertEqual({item["category"] for item in incidents}, {"payments", "orders"})
+            self.assertEqual(len({item["incident_id"] for item in incidents}), len(incidents))
+            with store._connection() as db:
+                self.assertEqual(db.execute("SELECT count(*) FROM incident_jobs").fetchone()[0], 0)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,6 @@
 """Durable, count-only detector host with a transactional episode outbox.
 
-This module is the first implementation stage. Existing replay and investigation
-flows continue to use their original runtime until the coordinator is connected.
+The coordinator applies episode events and creates investigations durably.
 """
 from __future__ import annotations
 
@@ -74,6 +73,17 @@ class DetectorHost:
                 );
                 CREATE INDEX IF NOT EXISTS idx_incident_jobs_status ON incident_jobs(status, created_at);
             """)
+            # Serialize the additive migration across hosts and retain the old
+            # status column as the statistical episode state for API clients.
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(incidents)")}
+            if "operational_status" not in columns:
+                db.execute("ALTER TABLE incidents ADD COLUMN operational_status TEXT NOT NULL DEFAULT 'open'")
+            db.execute("CREATE TABLE IF NOT EXISTS applied_episode_events ("
+                       "event_id TEXT PRIMARY KEY, stream_id TEXT NOT NULL, applied_at TEXT NOT NULL)")
+            # Older hosts already committed these deliveries with their effects.
+            db.execute("INSERT OR IGNORE INTO applied_episode_events (event_id,stream_id,applied_at) "
+                       "SELECT event_id,stream_id,delivered_at FROM episode_outbox WHERE delivered_at IS NOT NULL")
 
     def process(self, observation: CountObservation) -> dict[str, Any]:
         """Persist an observation, next checkpoint and its events in one transaction."""
@@ -168,8 +178,18 @@ class DetectorHost:
             for row in rows:
                 event = json.loads(row["payload_json"])
                 window = event["window"]
+                applied = db.execute("SELECT stream_id FROM applied_episode_events WHERE event_id=?",
+                                     (event["event_id"],)).fetchone()
+                if applied:
+                    if applied["stream_id"] != self.stream_id:
+                        raise ValueError("Episode event belongs to another stream")
+                    db.execute("UPDATE episode_outbox SET delivered_at=? WHERE event_id=?",
+                               (utc_now(), event["event_id"]))
+                    continue
                 if event["event_type"] == "episode_opened":
-                    db.execute("INSERT OR IGNORE INTO incidents VALUES (?,?,?,?,?,?,?,?)",
+                    db.execute("INSERT OR IGNORE INTO incidents "
+                               "(incident_id,stream_id,category,status,opened_at,latest_window_end,last_event_id,episode_json) "
+                               "VALUES (?,?,?,?,?,?,?,?)",
                                (event["episode_id"], self.stream_id, event["category"], "active",
                                 window["window_start"], window["window_end"], event["event_id"],
                                 _json(event["episode"])))
@@ -198,17 +218,17 @@ class DetectorHost:
                         )
                 else:
                     updated = db.execute("UPDATE incidents SET status=?,latest_window_end=?,last_event_id=?,episode_json=? "
-                                         "WHERE incident_id=? AND stream_id=?",
+                                         "WHERE incident_id=? AND stream_id=? AND category=?",
                                          ("ended" if event["event_type"] == "episode_ended" else "active",
                                           window["window_start"] if event["event_type"] == "episode_ended" else window["window_end"],
                                           event["event_id"], _json(event["episode"]),
-                                          event["episode_id"], self.stream_id))
+                                          event["episode_id"], self.stream_id, event["category"]))
                     if updated.rowcount != 1:
                         raise ValueError("Cannot update an unknown episode")
                     if automatic and event["event_type"] == "episode_updated":
                         self._queue_material_followup(db, event)
-                    elif automatic and event["event_type"] == "episode_ended":
-                        self._queue_final_update(db, event)
+                db.execute("INSERT INTO applied_episode_events (event_id,stream_id,applied_at) VALUES (?,?,?)",
+                           (event["event_id"], self.stream_id, utc_now()))
                 db.execute("UPDATE episode_outbox SET delivered_at=? WHERE event_id=? AND delivered_at IS NULL",
                            (utc_now(), event["event_id"]))
             db.commit()
@@ -287,19 +307,6 @@ class DetectorHost:
         if not changed:
             return
         reason = "Relevant service or issue update"
-        self._insert_coordinator_job(db, event, reason, end)
-
-    def _queue_final_update(self, db: sqlite3.Connection, event: dict[str, Any]) -> None:
-        """Queue one closing report only when its cutoff extends the last report."""
-        incident_id = event["episode_id"]
-        end = event["window"]["window_end"]
-        latest_job = db.execute(
-            "SELECT cutoff FROM incident_jobs WHERE incident_id=? AND status='completed' "
-            "ORDER BY created_at DESC,rowid DESC LIMIT 1", (incident_id,),
-        ).fetchone()
-        if latest_job and latest_job["cutoff"] >= end:
-            return
-        reason = "Final update after episode ended"
         self._insert_coordinator_job(db, event, reason, end)
 
     def _insert_coordinator_job(self, db: sqlite3.Connection, event: dict[str, Any],

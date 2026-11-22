@@ -38,6 +38,7 @@ type Report = {
 type Job = { job_id: string; reason: string; cutoff: string; status: string; created_at: string; error?: string | null; report?: Report | null }
 type Incident = {
   incident_id: string; stream_id: string; category: string; status: string
+  operational_status: string
   opened_at: string; latest_window_end: string; episode: Record<string, any>
   investigations: Job[]
 }
@@ -506,7 +507,8 @@ export default function EventDrivenMonitor() {
           return <article className={`incident-card ${incident.status === 'active' ? 'is-alerting' : 'is-ended'}`} key={incident.incident_id}>
             <header className="incident-card-heading"><div><div className="section-kicker">{incident.status === 'active' ? 'NEW ALERT' : 'ALERT EPISODE ENDED'} — {incident.category.toUpperCase()}</div>
               <h2>Episode began {formatTime(incident.opened_at)}</h2><p>{totals.windows} alert {totals.windows === 1 ? 'window' : 'windows'} · {totals.tickets} tickets vs {totals.expected.toFixed(1)} expected</p></div>
-              <span className={`incident-state ${incident.status}`}>{incident.status === 'active' ? 'Alerting' : 'Ended'}</span></header>
+              <div className="incident-statuses"><span className={`incident-state ${incident.status}`}>Alert episode {incident.status === 'active' ? 'active' : 'ended'}</span><span className="incident-operational-state">Incident {incident.operational_status}</span></div></header>
+            {incident.status === 'ended' && incident.operational_status === 'open' && <p className="incident-status-note">Ticket alerts have stopped for this episode. The incident remains open; this does not confirm the issue is resolved.</p>}
             {additionalChecks.length > 0 && <details className="alert-detector-details"><summary>Alert details</summary><p>Additional rate checks crossed their cutoffs: {additionalChecks.map((name) => detectorNames[name] ?? name).join(', ')}.</p></details>}
             <div className="investigation-state" aria-live="polite">
               {latestJob?.status === 'queued' && <><strong>Investigation queued</strong><span>Waiting for the investigator to start.</span></>}
