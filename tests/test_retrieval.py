@@ -23,9 +23,12 @@ class RetrievalTests(unittest.TestCase):
     def test_runbook_pdfs_are_searchable_and_page_numbered(self):
         pages = load_runbook_pages()
         self.assertEqual({page["runbook_id"] for page in pages},
-                         {"payments", "orders", "delivery", "incident_response"})
+                         {"payments", "orders", "account", "delivery", "incident_response"})
         self.assertTrue(all(page["page_number"] >= 1 and page["text"] for page in pages))
         self.assertTrue(any("queue depth" in page["text"].casefold() for page in pages))
+        account_pages = [page for page in pages if page["runbook_id"] == "account"]
+        self.assertTrue(account_pages)
+        self.assertTrue(any("identity-service" in page["text"].casefold() for page in account_pages))
 
     def test_editable_knowledge_documents_load_as_locatable_passages(self):
         passages = load_knowledge_passages()

@@ -4,7 +4,7 @@ A local, fictional operations-intelligence demo that replays ticket activity, de
 
 ## What the demo includes
 
-- Seeded synthetic ticket and service activity for payment authorization, order-queue, and carrier-service incidents, plus healthy and distractor controls. The live monitor uses its own ten-seed replay pool.
+- Seeded synthetic ticket and service activity for payment authorization, order-queue, account sign-in, and carrier-service incidents, plus healthy and distractor controls. Each live replay plants one category-specific incident and keeps the other categories as monitoring context.
 - Poisson and negative-binomial ticket arrivals, scored with likelihood ratios, standardized residuals, upward CUSUM, and a Gamma–Poisson Bayes factor.
 - Synthetic, read-only evidence tools and an automatic investigation for each new alert episode, with a manual follow-up action in the incident inbox.
 - Six grouped investigator tools search evidence, inspect service health, analyze customer themes, compare incident context, build a timeline, and retrieve advisory runbook guidance.
@@ -15,7 +15,7 @@ A local, fictional operations-intelligence demo that replays ticket activity, de
 - Four fictional runbooks have editable Markdown sources and searchable text PDFs. Service and dependency guidance, historical postmortems, and deployment guidance are additional searchable Markdown documents. Citations identify the source path and page or section.
 - Evidence-grounded fictional runbook suggestions include a verification check and never execute operational changes.
 - Empirically calibrated category-specific detector thresholds and held-out detector evaluation.
-- A live synthetic monitor with Normal, Medium spike, and High spike replay presets. It releases seeded ticket events over time, updates all category counts within each 30-minute window, and shows a small rolling sample of arriving tickets.
+- A live synthetic monitor with Payments Normal/Medium/High presets and selectable Orders, Account sign-in, and Delivery high-spike scenarios. It releases seeded ticket events over time, updates all category counts within each 30-minute window, and shows a small rolling sample of arriving tickets.
 - Automatic investigation by default, with a manual mode that records alerts and waits for an operator to start each investigation.
 - A seven-day seeded replay: four days of fixed history warm the existing detector, then three days stream over about two minutes. The stream can be paused, resumed, stepped by one 30-minute window, or replayed with the same seed. It ends explicitly and does not loop; it is synthetic replay, not a live external ticket connection.
 - An incident inbox for urgency, acknowledgement, investigation revisions, reported operator actions, monitoring observations, and human-controlled incident resolution/reopening. The live ticket monitor remains a separate workspace view.
@@ -28,9 +28,9 @@ The [continuous detection and incident investigation architecture](docs/design/e
 
 ### Synthetic evidence corpus and retrieval
 
-Each support interaction is one ticket and contributes exactly one to its category count. The simulator uses separate seeded random streams for counts, event evidence, and wording, so editing customer language does not change detector inputs. The new scenarios add an order-worker backlog and a carrier API degradation; their ticket text is varied and noisy, while service logs and issue records carry separate corroborating evidence. Incident scenarios also include a nearby catalog-search change as an innocent distractor. The hidden scenario truth remains in an evaluator-only table.
+Each support interaction is one ticket and contributes exactly one to its category count. The simulator uses separate seeded random streams for counts, event evidence, and wording, so editing customer language does not change detector inputs. The category-specific scenarios add order-worker backlog, identity-service sign-in failures, and carrier API degradation; ticket text is varied and noisy, while time-aligned service logs and issue/change records provide additional evidence. Incident scenarios also include a nearby catalog-search change as an innocent distractor. The hidden scenario truth remains in an evaluator-only table.
 
-The evidence world has several source types rather than one collection of PDFs: customer tickets, structured service logs, Jira-like issue histories, deployment/change records, four runbooks, service/dependency guidance, historical postmortems, and prior deployment notes. Tickets, logs, issues, and changes remain structured records; they are not duplicated as documents. Markdown is the editable source for reference documents. Runbook PDFs are retained for page-level citations; Markdown sources cite their file and section.
+The evidence world has several source types rather than one collection of PDFs: customer tickets, structured service logs, Jira-like issue histories, deployment/change records, five runbooks, service/dependency guidance, historical postmortems, and prior deployment notes. Tickets, logs, issues, and changes remain structured records; they are not duplicated as documents. Markdown is the editable source for reference documents. Runbook PDFs are retained for page-level citations; Markdown sources cite their file and section.
 
 The archive contains 20,000 structured records (4,000 tickets, 14,000 service-log summaries, 1,000 issue records, and 1,000 change records) plus 400 generated Markdown references with 10 sections each. These are synthetic, seeded records; the full generated archive and index are stored under ignored `.data/`. A small sample and manifest are tracked under `data/` for inspection.
 
@@ -106,7 +106,7 @@ Stop both services with:
 
 Or double-click `scripts/stop-dev.cmd`.
 
-The stop command stops only recognized services on ports `8000` and `5173`; it leaves other processes alone. `-Mock` starts an offline demo, but the severity-based demo flow requires OpenAI and will be disabled in mock mode. Keep `.env` private; it is ignored by Git.
+The stop command stops only recognized services on ports `8000` and `5173`; it leaves other processes alone. `-Mock` starts an offline demo, but the seeded live demo flow requires OpenAI and will be disabled in mock mode. Keep `.env` private; it is ignored by Git.
 
 If PowerShell blocks running local scripts, launch it with:
 
@@ -116,9 +116,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1
 
 Use the same command with `-Stop` to stop both services when the default policy blocks local scripts.
 
-1. The app opens to **Incident inbox**. Select **Live monitor** to start a replay. Expand **Replay settings**, choose **Normal**, **Medium spike**, or **High spike**, then press **Start demo**. The selected seed is shown; use **Replay this seed** to repeat it. A saved URL with `?run=...` still opens that specific replay.
+1. The app opens to **Incident inbox**. Select **Live monitor** to start a replay. Expand **Replay settings**, choose a Payments preset or a high-spike scenario for Orders, Account sign-in, or Delivery, then press **Start demo**. The selected scenario and seed are shown; use **Replay this seed** to repeat it. A saved URL with `?run=...` still opens that specific replay.
 2. The first compatible replay prepares and saves four days of detector history; later replays reuse the cached baseline and can begin streaming directly at Day 5. Days 5-7 stream in about two minutes. Watch all four category counts update as tickets arrive; only completed 30-minute windows are scored, using the existing count-only detector. A scrolling sample shows recent ticket wording, while the counts include every ticket.
-3. The Medium and High presets plant a payment spike at the same point in the replay, while Normal has no planted incident and can still produce a natural false alert. When a category alerts, its episode appears under **Alerts and investigations** and the investigation starts automatically. The card shows whether it is queued, running, complete, or needs attention.
+3. Payments Medium/High and each other-category preset plant one category-specific spike at the same point in the replay; Payments Normal has no planted incident and can still produce a natural false alert. Each replay exercises one category at a time. When a category alerts, its episode appears under **Alerts and investigations** and the investigation starts automatically. The card shows whether it is queued, running, complete, or needs attention.
 4. Return to **Incident inbox** to review the investigation, acknowledgement and notification history, report scope, and later monitoring. Record externally performed actions as human-reported, and resolve or reopen incidents with a reason. Recommendations are advisory; the app does not execute operational changes.
 5. Pause, resume, step, or stop a replay using its controls. Starting a new replay keeps earlier runs available in replay history. OpenAI investigations can use API credits.
 

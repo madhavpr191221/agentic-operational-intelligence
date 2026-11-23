@@ -51,6 +51,7 @@ class ScenarioRcaTests(unittest.TestCase):
     def test_incident_scenarios_support_category_specific_explanations(self):
         for scenario, category in (("payment_issue", "payments"),
                                    ("orders_queue_backlog", "orders"),
+                                   ("account_identity_outage", "account"),
                                    ("delivery_carrier_degradation", "delivery")):
             with self.subTest(scenario=scenario):
                 report = self._investigate(scenario, category)

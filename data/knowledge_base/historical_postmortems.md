@@ -2,7 +2,7 @@
 document_id: historical-postmortems
 document_type: postmortem
 available_at: 2025-12-01T00:00:00Z
-categories: payments,orders,delivery
+categories: payments,orders,account,delivery
 ---
 # Historical incident reviews
 
@@ -23,3 +23,7 @@ On 2025-11-02, order-processing queue depth and oldest-job age rose before order
 ## PM-2025-089: Stale tracking during a carrier outage
 
 On 2025-11-21, tracking complaints rose while Northstar Carrier API latency and rate-limit responses increased. Delivery-api itself remained available. Comparing carrier response codes with the last successful scan distinguished an external dependency outage from a local adapter failure.
+
+## PM-2025-101: Sign-in failures during identity verification degradation
+
+On 2025-12-03, sign-in and verification-code complaints rose while identity-service errors and p95 latency increased. Account-api request volume remained steady, and profile-write success stayed near baseline. The identity team confirmed a verification dependency degradation using request-level response codes. A profile form deployment occurred nearby but did not share the failing request path. The review recommends separating authentication symptoms from profile-update tickets and checking both account-api and identity-service telemetry before assigning cause.

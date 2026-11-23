@@ -255,6 +255,7 @@ class OperationsRuntime:
         truth_by_scenario = {
             "payment_issue": "payment_authorization_failure",
             "orders_queue_backlog": "order_worker_queue_backlog",
+            "account_identity_outage": "identity_service_sign_in_failure",
             "delivery_carrier_degradation": "carrier_api_degradation",
             "unrelated_issue": "unrelated_search_issue",
             "resolved_issue": "resolved_payment_issue",

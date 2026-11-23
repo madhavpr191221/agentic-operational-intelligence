@@ -90,7 +90,7 @@ class MockInvestigator(Investigator):
         hypotheses: list[Hypothesis] = []
         category_queries = {"payments": ("payment authorization timeout", "checkout-payments"),
                             "orders": ("order processing queue delayed status", "orders-api"),
-                            "account": ("account profile update", "account-api"),
+                            "account": ("sign-in verification failure identity-service latency", "account-api"),
                             "delivery": ("carrier tracking timeout", "delivery-api")}
         for category in categories:
             query, service = category_queries[category]

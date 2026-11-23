@@ -19,6 +19,7 @@ MILD_PAYMENT_FAILURE_PROBABILITY = 0.08
 INCIDENT_CATEGORY = {
     "payment_issue": "payments",
     "orders_queue_backlog": "orders",
+    "account_identity_outage": "account",
     "delivery_carrier_degradation": "delivery",
 }
 
@@ -28,30 +29,48 @@ class ReplayProfile:
     seed: int
     severity: str
     incident_start_window: int | None
+    live_scenario: str = "payments_high"
+    scenario: str = "payment_issue"
 
 
 # Fixed, reviewable demo pool. The common four-day baseline is generated from
 # a separate fixed seed; these seeds control only the streamed three days.
 LIVE_REPLAY_INCIDENT_START_WINDOW = 216
 LIVE_REPLAY_PROFILES = (
-    ReplayProfile(2101, "none", None),
-    ReplayProfile(2102, "none", None),
-    ReplayProfile(2103, "none", None),
-    ReplayProfile(2104, "none", None),
-    ReplayProfile(2201, "mild", LIVE_REPLAY_INCIDENT_START_WINDOW),
-    ReplayProfile(2202, "mild", LIVE_REPLAY_INCIDENT_START_WINDOW),
-    ReplayProfile(2203, "mild", LIVE_REPLAY_INCIDENT_START_WINDOW),
-    ReplayProfile(2301, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW),
-    ReplayProfile(2302, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW),
-    ReplayProfile(2303, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW),
+    ReplayProfile(2101, "none", None, "payments_normal", "healthy"),
+    ReplayProfile(2102, "none", None, "payments_normal", "healthy"),
+    ReplayProfile(2103, "none", None, "payments_normal", "healthy"),
+    ReplayProfile(2104, "none", None, "payments_normal", "healthy"),
+    ReplayProfile(2201, "mild", LIVE_REPLAY_INCIDENT_START_WINDOW, "payments_medium"),
+    ReplayProfile(2202, "mild", LIVE_REPLAY_INCIDENT_START_WINDOW, "payments_medium"),
+    ReplayProfile(2203, "mild", LIVE_REPLAY_INCIDENT_START_WINDOW, "payments_medium"),
+    ReplayProfile(2301, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW, "payments_high"),
+    ReplayProfile(2302, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW, "payments_high"),
+    ReplayProfile(2303, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW, "payments_high"),
+    ReplayProfile(2401, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW, "orders_high", "orders_queue_backlog"),
+    ReplayProfile(2402, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW, "orders_high", "orders_queue_backlog"),
+    ReplayProfile(2403, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW, "orders_high", "orders_queue_backlog"),
+    ReplayProfile(2501, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW, "account_high", "account_identity_outage"),
+    ReplayProfile(2502, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW, "account_high", "account_identity_outage"),
+    ReplayProfile(2503, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW, "account_high", "account_identity_outage"),
+    ReplayProfile(2601, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW, "delivery_high", "delivery_carrier_degradation"),
+    ReplayProfile(2602, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW, "delivery_high", "delivery_carrier_degradation"),
+    ReplayProfile(2603, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW, "delivery_high", "delivery_carrier_degradation"),
 )
 LIVE_REPLAY_BASELINE_SEED = 20260401
 LIVE_REPLAY_BASELINE_CACHE_VERSION = 1
 
 
-def choose_live_replay_profile(severity: str | None = None) -> ReplayProfile:
-    """Choose uniformly from the fixed demo pool, optionally by severity."""
-    profiles = LIVE_REPLAY_PROFILES
+def choose_live_replay_profile(severity: str | None = None,
+                               live_scenario: str | None = None) -> ReplayProfile:
+    """Choose a fixed seeded profile, preserving the legacy payment-only selector."""
+    profiles = tuple(profile for profile in LIVE_REPLAY_PROFILES
+                     if profile.live_scenario.startswith("payments_"))
+    if live_scenario is not None:
+        profiles = tuple(profile for profile in LIVE_REPLAY_PROFILES
+                         if profile.live_scenario == live_scenario)
+        if not profiles:
+            raise ValueError(f"No live replay profiles exist for scenario {live_scenario!r}")
     if severity is not None:
         profiles = tuple(profile for profile in profiles if profile.severity == severity)
         if not profiles:
@@ -99,7 +118,7 @@ def generate_live_stream(config: SimulationConfig) -> list[GeneratedWindow]:
 def _generate_live_stream_windows(config: SimulationConfig) -> list[GeneratedWindow]:
     stream_config = replace(
         config,
-        scenario="healthy" if config.incident_severity == "none" else "payment_issue",
+        scenario=config.scenario,
         monitor_history_windows=0,
         playback_duration_seconds=0.0,
     )
@@ -208,17 +227,20 @@ def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -
     # the seeded count process or its detector inputs.
     message_rng = random.Random(config.seed ^ 0x5A17C9E3)
     start = SIMULATION_START
-    issue_window = (config.incident_start_window if config.incident_start_window is not None
-                    else min(config.calibration_windows, config.window_count // 3))
-    resolved_window = min(issue_window + 12, config.window_count - 1)
     incident_start = (config.incident_start_window if config.incident_start_window is not None
                       else max(0, config.window_count - 4))
     incident_end_window = min(config.window_count, incident_start + config.incident_duration_windows)
     def incident_active(window_index: int) -> bool:
         return incident_start <= window_index < incident_end_window
     scenario_category = INCIDENT_CATEGORY.get(config.scenario)
+    aligned_scenarios = {"orders_queue_backlog", "account_identity_outage", "delivery_carrier_degradation"}
+    issue_window = (config.incident_start_window if config.incident_start_window is not None
+                    else incident_start if config.scenario in aligned_scenarios
+                    else min(config.calibration_windows, config.window_count // 3))
+    resolved_window = min(issue_window + 12, config.window_count - 1)
     issue_key = {
         "payment_issue": "PAY-204", "orders_queue_backlog": "ORD-318",
+        "account_identity_outage": "ACC-142",
         "delivery_carrier_degradation": "DEL-092", "resolved_issue": "PAY-205",
     }.get(config.scenario, "CAT-118")
     issue_details = {
@@ -226,6 +248,8 @@ def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -
                           "Customers report authorization timeouts; gateway responses are delayed."),
         "orders_queue_backlog": ("Order processing queue is growing", "orders-api",
                                  "Order workers are falling behind and order status is delayed."),
+        "account_identity_outage": ("Sign-in failures are increasing", "account-api",
+                                     "Customers report missing verification codes and failed sign-in attempts; identity-service errors and latency are elevated."),
         "delivery_carrier_degradation": ("Carrier API requests are timing out", "delivery-api",
                                          "Carrier status requests are slow or rate limited."),
         "resolved_issue": ("Payment authorization timeouts", "checkout-payments",
@@ -245,6 +269,18 @@ def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -
                          "service": issue_service, "description": issue_description,
                          "project": "OPS", "priority": "P2"},
             ))
+            change_by_scenario = {
+                "orders_queue_backlog": ("CHG-ORD-318", "orders-api", "Order worker capacity configuration updated"),
+                "account_identity_outage": ("CHG-ACC-142", "identity-service", "Identity verification service deployment completed"),
+                "delivery_carrier_degradation": ("CHG-DEL-092", "delivery-api", "Carrier adapter retry configuration updated"),
+            }
+            if config.scenario in change_by_scenario:
+                change_key, service, summary = change_by_scenario[config.scenario]
+                events.append(GeneratedEvent(
+                    simulated_at=_iso(window_start - timedelta(minutes=30)), source="change_log", event_type="change_record",
+                    payload={"change_key": change_key, "service": service, "summary": summary,
+                             "outcome": "monitoring_required", "author": "service-owner"},
+                ))
             events.append(GeneratedEvent(
                 simulated_at=_iso(window_start + timedelta(hours=1)), source="issue_tracker", event_type="issue_updated",
                 payload={"issue_key": issue_key, "title": issue_title, "status": "investigating",
@@ -315,8 +351,8 @@ def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -
         orders_requests = 500 + _poisson(evidence_rng, 40.0)
         orders_errors = _poisson(evidence_rng, 3.0)
         orders_queue_depth = max(0, int(evidence_rng.gauss(12.0, 4.0)))
-        if config.scenario == "orders_queue_backlog" and index >= config.window_count - 4:
-            orders_queue_depth += 900 + 100 * (index - (config.window_count - 4))
+        if config.scenario == "orders_queue_backlog" and incident_active(index):
+            orders_queue_depth += 900 + 100 * (index - incident_start)
             orders_errors += _poisson(evidence_rng, 20.0)
         events.append(GeneratedEvent(
             simulated_at=_iso(window_start + timedelta(minutes=6)), source="product_logs",
@@ -331,9 +367,9 @@ def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -
         delivery_requests = 400 + _poisson(evidence_rng, 35.0)
         delivery_errors = _poisson(evidence_rng, 2.0)
         carrier_latency_ms = max(80, int(evidence_rng.gauss(240, 35)))
-        if config.scenario == "delivery_carrier_degradation" and index >= config.window_count - 4:
+        if config.scenario == "delivery_carrier_degradation" and incident_active(index):
             delivery_errors += _poisson(evidence_rng, 95.0)
-            carrier_latency_ms += 1800 + 300 * (index - (config.window_count - 4))
+            carrier_latency_ms += 1800 + 300 * (index - incident_start)
         events.append(GeneratedEvent(
             simulated_at=_iso(window_start + timedelta(minutes=8)), source="product_logs",
             event_type="service_log_summary",
@@ -344,6 +380,24 @@ def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -
                      "level": "error" if delivery_errors > 20 else "info",
                      "message": "Carrier API timeouts and rate limits observed."
                      if delivery_errors > 20 else "Carrier API responses within normal range."},
+        ))
+
+        account_requests = 250 + _poisson(evidence_rng, 24.0)
+        account_errors = _poisson(evidence_rng, 2.0)
+        identity_latency_ms = max(60, int(evidence_rng.gauss(180, 28)))
+        if config.scenario == "account_identity_outage" and incident_active(index):
+            account_errors += 90 + _poisson(evidence_rng, 12.0)
+            identity_latency_ms += 1800 + 200 * (index - incident_start)
+        events.append(GeneratedEvent(
+            simulated_at=_iso(window_start + timedelta(minutes=10)), source="product_logs",
+            event_type="service_log_summary",
+            payload={"service": "account-api", "dependency": "identity-service",
+                     "requests": account_requests, "errors": account_errors,
+                     "p95_latency_ms": identity_latency_ms,
+                     "verification_failures": account_errors,
+                     "level": "error" if account_errors / account_requests >= 0.10 else "info",
+                     "message": "Identity verification errors and latency elevated; sign-in may fail."
+                     if account_errors / account_requests >= 0.10 else "Account and identity service responses within normal range."},
         ))
 
         means = dict(zip(CATEGORIES, config.baseline_category_means, strict=True))
@@ -407,6 +461,13 @@ def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -
                         ("delivery_status_stalled", "Delivery status is stuck", "My package status has not changed, and the carrier page is unavailable."),
                         ("carrier_eta_missing", "Delivery estimate disappeared", "The delivery estimate disappeared after the carrier tracking service stopped responding."),
                         ("carrier_tracking_timeout", "Carrier page will not load", "I cannot get a response from the carrier tracking link to check my delivery."),
+                    ))
+                elif category == "account" and is_incident_ticket:
+                    reason, title, body = message_rng.choice((
+                        ("sign_in_failure", "Cannot sign in to my account", "I enter my password and verification code, but sign-in fails and asks me to try again."),
+                        ("verification_code_missing", "Sign-in code never arrived", "I cannot access my account because the verification code is not arriving."),
+                        ("identity_verification_timeout", "Account verification keeps timing out", "The identity check times out before I can complete sign-in."),
+                        ("account_access_blocked", "Locked out of my account", "My account keeps rejecting the verification step even though I requested a new code."),
                     ))
                 else:
                     reason, title, body = message_rng.choice({

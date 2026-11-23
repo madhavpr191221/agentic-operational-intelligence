@@ -62,7 +62,7 @@ type Attention = {
     status: string; delivery_mode: string; attempt_count: number; last_error?: string | null}>
 }
 type Health = { investigator_mode: string; openai_key_configured: boolean }
-type AlertLevel = 'normal' | 'medium' | 'high'
+type LiveScenario = 'payments_normal' | 'payments_medium' | 'payments_high' | 'orders_high' | 'account_high' | 'delivery_high'
 type DetectorScore = { detector: string; score: number; threshold: number; anomalous: boolean }
 type ScorePoint = { score: number; threshold: number }
 
@@ -70,7 +70,8 @@ const categoryNames = ['payments', 'orders', 'account', 'delivery'] as const
 const scenarioNames: Record<string, string> = {
   payment_issue: 'Payment authorization failure', healthy: 'Healthy control',
   unrelated_issue: 'Unrelated issue distractor', resolved_issue: 'Resolved payment issue',
-  orders_queue_backlog: 'Order processing backlog', delivery_carrier_degradation: 'Carrier service degradation',
+  orders_queue_backlog: 'Order processing backlog', account_identity_outage: 'Account sign-in and identity failures',
+  delivery_carrier_degradation: 'Carrier service degradation',
 }
 const sourceNames: Record<string, string> = {
   support_tickets: 'Customer ticket', product_logs: 'Service log', issue_tracker: 'Tracked issue',
@@ -83,13 +84,17 @@ function formatTime(value?: string | null) {
     timeZone: 'UTC', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
   }) + ' UTC'
 }
-const alertLevelNames: Record<AlertLevel, string> = {
-  normal: 'Normal', medium: 'Medium spike', high: 'High spike',
+const liveScenarioNames: Record<LiveScenario, string> = {
+  payments_normal: 'Payments · Normal', payments_medium: 'Payments · Medium spike', payments_high: 'Payments · High spike',
+  orders_high: 'Orders · High spike', account_high: 'Account sign-in · High spike', delivery_high: 'Delivery · High spike',
 }
 
-function runAlertLevel(value?: Run | null): AlertLevel {
+function runLiveScenario(value?: Run | null): LiveScenario {
+  if (value?.scenario === 'orders_queue_backlog') return 'orders_high'
+  if (value?.scenario === 'account_identity_outage') return 'account_high'
+  if (value?.scenario === 'delivery_carrier_degradation') return 'delivery_high'
   const severity = value?.config.incident_severity
-  return severity === 'mild' ? 'medium' : severity === 'severe' ? 'high' : 'normal'
+  return severity === 'mild' ? 'payments_medium' : severity === 'none' ? 'payments_normal' : 'payments_high'
 }
 const detectorNames: Record<string, string> = {
   standardized_residual: 'Z-score', cusum: 'CUSUM',
@@ -160,7 +165,7 @@ export default function EventDrivenMonitor({ onOpenInbox }: { onOpenInbox: () =>
   const [attentionItems, setAttentionItems] = useState<Attention[]>([])
   const [queue, setQueue] = useState<{queued: number; running: number; pending_followups: number; oldest_wait_seconds: number | null} | null>(null)
   const [health, setHealth] = useState<Health | null>(null)
-  const [alertLevel, setAlertLevel] = useState<AlertLevel>('high')
+  const [liveScenario, setLiveScenario] = useState<LiveScenario>('payments_high')
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     try { return localStorage.getItem('signalroom-theme') === 'light' ? 'light' : 'dark' } catch { return 'dark' }
   })
@@ -206,7 +211,7 @@ export default function EventDrivenMonitor({ onOpenInbox }: { onOpenInbox: () =>
     }
     lastSequence.current = cursor || 0
     setRun(savedRun)
-    setAlertLevel(runAlertLevel(savedRun))
+    setLiveScenario(runLiveScenario(savedRun))
     setEvents(restored)
     setError('')
   }, [])
@@ -390,12 +395,12 @@ export default function EventDrivenMonitor({ onOpenInbox }: { onOpenInbox: () =>
       : `Day ${Math.floor(currentWindowIndex / 48) + 1} · ${formatTime(windowStartAt(currentWindowIndex))} – ${formatTime(new Date(Date.parse(windowStartAt(currentWindowIndex)) + 30 * 60_000).toISOString())}`
     : latestObservation ? `Last window completed: ${formatTime(latestObservation.payload.window_end)}` : 'Waiting for the first completed window'
 
-  async function startReplay(seedOverride?: number, levelOverride?: AlertLevel) {
+  async function startReplay(seedOverride?: number, scenarioOverride?: LiveScenario) {
     if (busy) return
     setBusy(true); setError(''); setEvents([]); pendingEvents.current = []; setIncidents([]); lastSequence.current = 0
     try {
       const next = await jsonRequest<Run>('/api/runs', {
-        method: 'POST', body: JSON.stringify({ randomized_week: true, alert_level: levelOverride ?? alertLevel,
+        method: 'POST', body: JSON.stringify({ randomized_week: true, live_scenario: scenarioOverride ?? liveScenario,
           seed: seedOverride, arrival_model: 'poisson', investigation_mode: 'automatic' }),
       })
       setRun(next)
@@ -480,16 +485,17 @@ export default function EventDrivenMonitor({ onOpenInbox }: { onOpenInbox: () =>
       <details className="replay-setup" open={!run}>
         <summary>{run ? 'Replay settings' : 'Choose a demo and start'}</summary>
         <div className="replay-fields">
-          <label className="field"><span>Alert level</span><select value={alertLevel} onChange={(event) => setAlertLevel(event.target.value as AlertLevel)}>
-            <option value="normal">Normal</option><option value="medium">Medium spike</option><option value="high">High spike</option>
+          <label className="field"><span>Demo scenario</span><select value={liveScenario} onChange={(event) => setLiveScenario(event.target.value as LiveScenario)}>
+            <optgroup label="Payments"><option value="payments_normal">Normal</option><option value="payments_medium">Medium spike</option><option value="payments_high">High spike</option></optgroup>
+            <optgroup label="Other categories"><option value="orders_high">Orders · processing backlog</option><option value="account_high">Account · sign-in failures</option><option value="delivery_high">Delivery · carrier degradation</option></optgroup>
           </select></label>
           <button className="primary-button" onClick={() => void startReplay()} disabled={busy || runIsActive || !openAiReady}>
             {busy ? 'Preparing…' : run ? 'Start new demo' : 'Start demo'}
           </button>
         </div>
-        <p className="replay-note">{alertLevel === 'normal'
+        <p className="replay-note">{liveScenario === 'payments_normal'
           ? 'No incident is planted; the detector still watches for unusual counts.'
-          : `${alertLevelNames[alertLevel]} uses a seeded payment incident; the detector decides when it alerts.`} Four days prepare the baseline, then three days stream in about two minutes. An alert starts an OpenAI investigation automatically.</p>
+          : `${liveScenarioNames[liveScenario]} uses a seeded, single-category incident; the detector decides when it alerts.`} Four days prepare the baseline, then three days stream in about two minutes. An alert starts an OpenAI investigation automatically.</p>
         <p className={`openai-readiness ${openAiReady ? 'is-ready' : 'is-unavailable'}`} role="status">
           {!health ? 'Checking OpenAI setup…' : health.investigator_mode !== 'openai'
             ? 'OpenAI is required for this demo. Restart the app without offline mock mode.'
@@ -497,8 +503,8 @@ export default function EventDrivenMonitor({ onOpenInbox }: { onOpenInbox: () =>
         </p>
       </details>
 
-      {run && <div className="replay-toolbar"><span>{liveWeek ? `${alertLevelNames[runAlertLevel(run)]} · seven-day seeded replay` : scenarioNames[run.scenario] ?? run.scenario} · seed {run.seed} · {currentRunMode} investigation</span>
-        <div>{run.status === 'running' && <button disabled={controlBusy} onClick={() => void controlReplay('pause')}>Pause</button>}{run.status === 'paused' && <><button disabled={controlBusy} onClick={() => void controlReplay('resume')}>Resume</button><button disabled={controlBusy} onClick={() => void controlReplay('step')}>Step window</button></>}{['running', 'paused'].includes(run.status) && <button disabled={controlBusy} onClick={() => void controlReplay('stop')}>Stop</button>}{liveWeek && ['completed', 'stopped'].includes(run.status) && <button onClick={() => void startReplay(run.seed, runAlertLevel(run))} disabled={busy}>Replay this seed</button>}</div></div>}
+      {run && <div className="replay-toolbar"><span>{liveWeek ? `${liveScenarioNames[runLiveScenario(run)]} · seven-day seeded replay` : scenarioNames[run.scenario] ?? run.scenario} · seed {run.seed} · {currentRunMode} investigation</span>
+        <div>{run.status === 'running' && <button disabled={controlBusy} onClick={() => void controlReplay('pause')}>Pause</button>}{run.status === 'paused' && <><button disabled={controlBusy} onClick={() => void controlReplay('resume')}>Resume</button><button disabled={controlBusy} onClick={() => void controlReplay('step')}>Step window</button></>}{['running', 'paused'].includes(run.status) && <button disabled={controlBusy} onClick={() => void controlReplay('stop')}>Stop</button>}{liveWeek && ['completed', 'stopped'].includes(run.status) && <button onClick={() => void startReplay(run.seed, runLiveScenario(run))} disabled={busy}>Replay this seed</button>}</div></div>}
       {run && liveWeek && <div className="replay-progress" role="progressbar" aria-valuenow={Math.round(Number(latestProgress?.payload.progress ?? 0) * 100)} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${Math.round(Number(latestProgress?.payload.progress ?? 0) * 100)}%` }} /></div>}
 
       <section className="counts-panel panel" aria-label="Latest category ticket counts">

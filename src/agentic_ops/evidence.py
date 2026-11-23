@@ -379,7 +379,7 @@ class EvidenceTools:
                                 limit: int = 8) -> dict[str, Any]:
         """Search runbooks and dated reference passages available at the alert cutoff."""
         runbook_by_category = {"payments": "payments", "orders": "orders", "delivery": "delivery",
-                               "account": "incident_response"}
+                               "account": "account"}
         records = self.store.search_events(run_id, ("runbooks", "knowledge_docs"), "", 500,
                                            ("runbook_page", "document_passage"), end_at=end_at)
         selected_runbook = runbook_by_category.get(category)
@@ -636,7 +636,7 @@ class EvidenceTools:
         """Return non-executing next steps only when supplied evidence supports a relevant runbook."""
         records = self.store.get_events_by_evidence_ids(run_id, (evidence_ids or [])[:20])
         runbook_ids = {"payments": "payments", "orders": "orders", "delivery": "delivery",
-                       "account": "incident_response"}
+                       "account": "account"}
         runbook = next((item for item in records if item["source"] == "runbooks"
                         and item["payload"].get("runbook_id") == runbook_ids.get(category)), None)
         relevant = [item for item in records if item["source"] != "runbooks" and (

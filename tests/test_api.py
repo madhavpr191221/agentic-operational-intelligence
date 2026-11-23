@@ -23,8 +23,9 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(client.get("/api/incidents/missing").status_code, 404)
             scenarios = client.get("/api/scenarios").json()
             self.assertEqual({item["id"] for item in scenarios},
-                             {"payment_issue", "healthy", "unrelated_issue", "resolved_issue",
-                              "orders_queue_backlog", "delivery_carrier_degradation"})
+                              {"payment_issue", "healthy", "unrelated_issue", "resolved_issue",
+                              "orders_queue_backlog", "account_identity_outage",
+                              "delivery_carrier_degradation"})
             runtime.stop()
 
     def test_incident_api_exposes_statistical_and_operational_state(self):

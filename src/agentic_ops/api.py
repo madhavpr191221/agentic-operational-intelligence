@@ -23,17 +23,23 @@ Speed = Literal["slow", "normal", "fast"]
 InvestigationMode = Literal["automatic", "manual"]
 AlertLevel = Literal["normal", "medium", "high"]
 ALERT_LEVEL_SEVERITY = {"normal": "none", "medium": "mild", "high": "severe"}
+LiveScenario = Literal[
+    "payments_normal", "payments_medium", "payments_high",
+    "orders_high", "account_high", "delivery_high",
+]
 
 
 class RunRequest(BaseModel):
     scenario: Literal["payment_issue", "healthy", "unrelated_issue", "resolved_issue",
-                      "orders_queue_backlog", "delivery_carrier_degradation"] = "payment_issue"
+                      "orders_queue_backlog", "account_identity_outage",
+                      "delivery_carrier_degradation"] = "payment_issue"
     seed: int | None = None
     arrival_model: Literal["poisson", "negative_binomial"] = "poisson"
     speed: Speed = "normal"
     investigation_mode: InvestigationMode = "automatic"
     randomized_week: bool = False
     alert_level: AlertLevel | None = None
+    live_scenario: LiveScenario | None = None
 
 
 class EpisodeSelection(BaseModel):
@@ -215,6 +221,7 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
             {"id": "unrelated_issue", "label": "Unrelated issue distractor"},
             {"id": "resolved_issue", "label": "Resolved payment issue"},
             {"id": "orders_queue_backlog", "label": "Order processing backlog"},
+            {"id": "account_identity_outage", "label": "Account sign-in and identity failures"},
             {"id": "delivery_carrier_degradation", "label": "Carrier service degradation"},
         ]
 
@@ -226,21 +233,31 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
     def start_run(request: RunRequest) -> dict:
         if request.alert_level is not None and not request.randomized_week:
             raise HTTPException(status_code=422, detail="alert_level requires a seeded live replay")
-        if request.alert_level is not None and not app.state.runtime.openai_key_configured:
-            raise HTTPException(status_code=409, detail="The severity-based demo requires an OpenAI investigator and configured key")
+        if request.live_scenario is not None and not request.randomized_week:
+            raise HTTPException(status_code=422, detail="live_scenario requires a seeded live replay")
+        if request.live_scenario is not None and request.alert_level is not None:
+            raise HTTPException(status_code=422, detail="Choose either live_scenario or alert_level")
+        if (request.alert_level is not None or request.live_scenario is not None) and not app.state.runtime.openai_key_configured:
+            raise HTTPException(status_code=409, detail="The seeded demo requires an OpenAI investigator and configured key")
         if request.randomized_week:
             if request.seed is None:
                 severity = ALERT_LEVEL_SEVERITY.get(request.alert_level) if request.alert_level else None
-                profile = choose_live_replay_profile(severity)
+                profile = (choose_live_replay_profile(live_scenario=request.live_scenario)
+                           if request.live_scenario is not None
+                           else choose_live_replay_profile(severity))
             else:
                 profile = next((item for item in LIVE_REPLAY_PROFILES if item.seed == request.seed), None)
                 if profile is None:
                     raise HTTPException(status_code=422, detail="Seed is not in the live replay seed pool")
+                if request.live_scenario is None and not profile.live_scenario.startswith("payments_"):
+                    raise HTTPException(status_code=422, detail="Select the matching live_scenario for this seed")
                 expected_severity = ALERT_LEVEL_SEVERITY.get(request.alert_level) if request.alert_level else None
                 if expected_severity is not None and profile.severity != expected_severity:
                     raise HTTPException(status_code=422, detail="Seed does not match the selected alert level")
+                if request.live_scenario is not None and profile.live_scenario != request.live_scenario:
+                    raise HTTPException(status_code=422, detail="Seed does not match the selected demo scenario")
             config = SimulationConfig(
-                scenario="healthy" if profile.severity == "none" else "payment_issue",
+                scenario=profile.scenario,
                 seed=profile.seed,
                 arrival_model=request.arrival_model,
                 tick_delay_seconds=0.0,

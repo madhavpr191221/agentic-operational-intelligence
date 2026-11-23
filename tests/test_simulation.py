@@ -87,7 +87,8 @@ class SimulationTests(unittest.TestCase):
                               for category in window.category_counts}, window.category_counts)
 
     def test_incident_wording_does_not_change_counts_or_ticket_record_count(self):
-        for scenario in ("payment_issue", "orders_queue_backlog", "delivery_carrier_degradation"):
+        for scenario in ("payment_issue", "orders_queue_backlog", "account_identity_outage",
+                         "delivery_carrier_degradation"):
             config = SimulationConfig(scenario=scenario, seed=93, window_count=16, calibration_windows=4)
             full = list(generate_run(config))
             counts = list(generate_run(config, include_ticket_events=False))

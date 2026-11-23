@@ -20,6 +20,6 @@ The checkout flow calls `checkout-api`, which calls `checkout-payments`. The pay
 
 `delivery-api` requests tracking updates from the Northstar Carrier API. The fulfillment integrations team owns the adapter; the carrier owns its external service. Useful signals include carrier request errors, p95 latency, rate-limit responses, and age of the last successful scan. Stale tracking can also result from a carrier having no new scan, so compare API health with carrier responses.
 
-## Account: profile and identity
+## Account: sign-in, identity, and profile
 
-`account-api` writes profile changes and checks identity state through the identity service. The identity team owns authentication; customer platform owns profile writes. Useful signals include write failures, identity-service latency, and profile update retries. A failed profile save can be a client validation issue even when both services are healthy.
+`account-api` handles sign-in requests and profile changes, and calls `identity-service` for verification. The identity team owns authentication; customer platform owns profile writes. Useful signals include verification failures, sign-in error rate, identity-service latency, and profile update retries. A failed profile save can be a client validation issue even when both services are healthy; profile-write symptoms should not be grouped automatically with sign-in failures.

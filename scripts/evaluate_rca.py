@@ -14,6 +14,7 @@ from agentic_ops.service import OperationsRuntime, _load_openai_key_from_dotenv
 from agentic_ops.store import EventStore
 
 POSITIVE_CATEGORIES = {"payment_issue": "payments", "orders_queue_backlog": "orders",
+                      "account_identity_outage": "account",
                       "delivery_carrier_degradation": "delivery"}
 CONTROL_SCENARIOS = ("healthy", "unrelated_issue", "resolved_issue")
 SCENARIOS = (*POSITIVE_CATEGORIES, *CONTROL_SCENARIOS)

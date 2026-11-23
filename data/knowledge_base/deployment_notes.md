@@ -2,7 +2,7 @@
 document_id: historical-deployment-notes
 document_type: deployment_note
 available_at: 2025-12-15T00:00:00Z
-categories: payments,orders,delivery
+categories: payments,orders,account,delivery
 ---
 # Historical deployment notes
 
@@ -15,3 +15,7 @@ Completed 2025-12-16 14:00 UTC by the discovery team. The catalog-search cache l
 ## CHG-752: Order worker batch-size rollback
 
 Completed 2025-12-22 09:30 UTC by the commerce operations team. A worker batch-size increase caused database write contention in staging and was rolled back before production rollout. Production order-queue metrics remained within their usual range. The record documents a potential failure mode, but it is not evidence that production workers are currently saturated.
+
+## CHG-781: Identity verification dependency rollout
+
+Completed 2025-12-27 16:00 UTC by the identity team. A verification-service deployment changed request batching. Sign-in tickets, identity-service error rate, and p95 latency remained within their usual ranges during the observation period. The change is historical context only; a future similarity does not establish that this deployment or behavior recurred.
