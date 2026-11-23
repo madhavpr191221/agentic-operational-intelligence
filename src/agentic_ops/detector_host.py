@@ -422,4 +422,28 @@ def list_incidents(store: EventStore, stream_id: str | None = None) -> list[dict
             query += " WHERE stream_id=?"
             params = (stream_id,)
         rows = db.execute(query + " ORDER BY opened_at DESC,incident_id", params).fetchall()
-    return [{**dict(row), "episode": json.loads(row["episode_json"])} for row in rows]
+        incidents = []
+        for row in rows:
+            item = {**dict(row), "episode": json.loads(row["episode_json"])}
+            episode = item["episode"]
+            counts = db.execute(
+                "SELECT COUNT(*) AS windows,COALESCE(SUM(CAST(json_extract(payload_json,'$.ticket_count') AS INTEGER)),0) AS tickets,"
+                "COALESCE(SUM(CAST(json_extract(payload_json,'$.expected') AS REAL)),0) AS expected "
+                "FROM events WHERE run_id=? AND event_type='anomaly_alert' "
+                "AND json_extract(payload_json,'$.category')=? "
+                "AND CAST(json_extract(payload_json,'$.window_index') AS INTEGER) BETWEEN ? AND ?",
+                (row["stream_id"], row["category"], int(episode.get("start_window", 0)),
+                 int(episode.get("latest_window", episode.get("start_window", 0)))),
+            ).fetchone()
+            item["statistics"] = {
+                "alert_windows": int(counts["windows"]), "tickets": int(counts["tickets"]),
+                "expected": float(counts["expected"]), "peak_window_tickets": episode.get("peak_ticket_count"),
+            }
+            latest_job = db.execute(
+                "SELECT job_id,reason,cutoff,status,created_at,completed_at FROM incident_jobs "
+                "WHERE incident_id=? ORDER BY COALESCE(queued_at,created_at) DESC,rowid DESC LIMIT 1",
+                (row["incident_id"],),
+            ).fetchone()
+            item["latest_investigation"] = dict(latest_job) if latest_job else None
+            incidents.append(item)
+    return incidents

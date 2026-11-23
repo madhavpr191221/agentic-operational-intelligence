@@ -150,7 +150,7 @@ async function jsonRequest<T>(url: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
-export default function EventDrivenMonitor() {
+export default function EventDrivenMonitor({ onOpenInbox }: { onOpenInbox: () => void }) {
   const [runs, setRuns] = useState<Run[]>([])
   const [run, setRun] = useState<Run | null>(null)
   const [events, setEvents] = useState<StreamEvent[]>([])
@@ -457,6 +457,7 @@ export default function EventDrivenMonitor() {
     <header className="topbar">
       <div className="brand-lockup"><div className="brand-mark"><span /><span /><span /></div><div><div className="brand-name">signal<span>room</span></div><div className="brand-caption">OPERATIONS INTELLIGENCE</div></div></div>
       <div className="topbar-right"><div className={`connection-pill ${connected ? 'is-connected' : ''}`}><i />{connected ? 'EVENT STREAM CONNECTED' : 'SYNTHETIC REPLAY'}</div>
+        <button className="theme-toggle" type="button" onClick={onOpenInbox}>Incident inbox</button>
         <button className="theme-toggle" type="button" onClick={() => setTheme((value) => value === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? '☼ Light mode' : '☾ Dark mode'}</button><div className="avatar">AR</div></div>
     </header>
     <div className="monitor-shell"><section className="monitor-main">

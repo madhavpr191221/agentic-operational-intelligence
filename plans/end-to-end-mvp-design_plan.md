@@ -49,14 +49,20 @@ Preserve the current detector configuration and scoring. Do not add a statistica
 
 ## Stage 4: Operator workspace and human actions
 
-**Goal:** Enable the primary user to understand, coordinate, and track an incident.
+**Goal:** Give the Support Operations Lead one simple incident screen where detector-opened episodes appear immediately and the same incident record evolves through investigation and human response.
 
-- Present an operational overview and incident inbox while retaining access to the live ticket monitor. Show episode statistics and state, investigation status and revisions, evidence cutoff, finding and uncertainty, urgency rationale, notification history, and a timeline.
-- Allow an authorized human to acknowledge and record an action taken outside the application, including what happened, when, and who recorded it; include performer/team when known. Label actions human-reported. The application does not execute remediation.
-- Show later ticket trends, available service-health evidence, and reported actions together. Use descriptive states such as Unknown, Ongoing, Improving, and Recovery signs without a two-healthy-window classifier or automatic causal attribution.
-- Support authorized human incident closure with a reason and supporting context. Acknowledgement, quiet windows, and recovery observations do not automatically close the incident.
+- Keep one row per opened episode: subsequent alert windows update its statistics; a later separate episode creates a separate row. The incident list is the operator's inbox, not a second source of diagnoses.
+- Scope the default Open and Resolved queues to the latest synthetic replay. Provide Replay history to browse incidents from older runs. Show scenario/seed for history records so runs are distinguishable.
+- Each row shows category, alert-window dates, ticket total versus expected, episode state, investigation state, and urgency state. Sort unacknowledged Immediate first, then other assessed levels, then Assessment pending. Do not label an unassessed incident Monitor.
+- Keep urgency independent from investigation progress. Before an assessment exists, show only detector facts and queued/running status. Display findings, evidence, uncertainty, and recommendations only from saved investigator reports; show the policy rationale with assessed urgency.
+- Separate timestamps by clock and label them: replay/event times are synthetic UTC; application actions, queue activity, report completion, notifications, and acknowledgements use app time with timezone. Do not sort these two clocks together as if they shared chronology.
+- Retain the incident detail workspace for report revisions/cutoffs, acknowledgement and notification history, post-alert monitoring, and separate Replay events and App activity timelines.
+- Allow the configured local human to acknowledge, record human-reported actions (what, action time, recorder, optional performer/reference), resolve with a reason/context, and reopen with a reason. Resolution moves the item from Open to Resolved regardless of urgency; quiet windows and recovery cues do not close it. Preserve history and label local identity as unverified.
+- Keep recovery cues descriptive (Unknown, Ongoing, Improving, Recovery signs); no recovery classifier, causality claim, or automated remediation.
 
-**Completion gate:** Verify the full operator workflow and state distinctions in the UI and API, including immutable report history, authorization behavior, correct action provenance, and absence of automatic closure or unsupported causal claims.
+**Interfaces:** Preserve existing detail, notification, acknowledge, action, close, and reopen APIs. Add list projection fields for per-episode ticket statistics and latest investigation state. Use the existing `/api/runs` and `stream_id` incident/notification filters for latest-run scope and history; keep changes additive.
+
+**Completion gate:** Verify immediate inbox visibility before investigation completion; in-place Queued/Running/Complete/Failed progression; one row per episode; correct assessment-pending and urgency ordering; latest-run default and cross-run history; all-priority resolve/reopen queue movement; explicitly separated replay/app times; report provenance; action provenance; and no automatic closure or unsupported causal claims. Run deterministic API/backend regressions and the frontend build.
 
 ## Stage 5: End-to-end demonstration and resilience
 

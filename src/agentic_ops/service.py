@@ -23,6 +23,7 @@ from agentic_ops.detection import (
 from agentic_ops.domain import CATEGORIES, SimulationConfig
 from agentic_ops.detector_host import DetectorHost
 from agentic_ops.incident_worker import IncidentWorker
+from agentic_ops.incident_workspace import IncidentWorkspace
 from agentic_ops.notifications import NotificationCoordinator
 from agentic_ops.evidence import EvidenceTools
 from agentic_ops.simulation import (
@@ -171,6 +172,7 @@ class OperationsRuntime:
         self.incident_worker.start()
         self.notifications = NotificationCoordinator(self.store)
         self.notifications.start()
+        self.incident_workspace = IncidentWorkspace(self.store, self.notifications.settings.operator_name)
 
     def stop(self) -> None:
         """Stop background workers when the API process shuts down."""

@@ -51,7 +51,8 @@ class DetectorHostTests(unittest.TestCase):
                 if index == 4:
                     store.add_event(run_id, item.window_end, "detector", "anomaly_alert",
                                     {"category": "payments", "window_index": index,
-                                     "window_end": item.window_end})
+                                     "window_end": item.window_end, "ticket_count": 40,
+                                     "expected": 4.5})
             self.assertEqual(host.deliver_pending(automatic=True), 1)
             self.assertEqual(host.deliver_pending(automatic=True), 0)
             with store._connection() as db:
@@ -61,6 +62,11 @@ class DetectorHostTests(unittest.TestCase):
             self.assertEqual(len(jobs), 1)
             self.assertEqual(jobs[0]["reason"], "initial alert")
             self.assertEqual(jobs[0]["sequence_bound"], 1)
+            listed = list_incidents(store, run_id)[0]
+            self.assertEqual(listed["statistics"], {
+                "alert_windows": 1, "tickets": 40, "expected": 4.5, "peak_window_tickets": 40,
+            })
+            self.assertEqual(listed["latest_investigation"]["status"], "queued")
 
     def test_missing_or_conflicting_observation_cannot_advance_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:

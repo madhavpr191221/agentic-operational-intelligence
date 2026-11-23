@@ -55,6 +55,25 @@ class IncidentInvestigationRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=200)
 
 
+class IncidentActionRequest(BaseModel):
+    action_description: str = Field(min_length=1, max_length=2000)
+    occurred_at: datetime
+    performed_by: str | None = Field(default=None, max_length=200)
+    reference: str | None = Field(default=None, max_length=500)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+
+class IncidentClosureRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=1000)
+    supporting_context: str | None = Field(default=None, max_length=2000)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+
+class IncidentReopenRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=1000)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+
 def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
     selected_runtime = runtime or OperationsRuntime()
 
@@ -106,15 +125,46 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
 
     @app.get("/api/incidents/{incident_id}")
     def incident(incident_id: str) -> dict:
-        found = next((item for item in list_incidents(app.state.runtime.store)
-                      if item["incident_id"] == incident_id), None)
-        if found is None:
-            raise HTTPException(status_code=404, detail="Unknown incident")
-        with app.state.runtime.store._connection() as db:
-            jobs = db.execute("SELECT j.job_id,j.reason,j.cutoff,j.status,j.created_at,j.error,r.revision FROM incident_jobs j "
-                              "LEFT JOIN incident_report_revisions r ON r.job_id=j.job_id "
-                              "WHERE j.incident_id=? ORDER BY j.created_at,j.rowid", (incident_id,)).fetchall()
-        return {**found, "investigations": [dict(row) for row in jobs]}
+        try:
+            return app.state.runtime.incident_workspace.detail(incident_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/incidents/{incident_id}/actions", status_code=201)
+    def record_incident_action(incident_id: str, request: IncidentActionRequest) -> dict:
+        try:
+            return app.state.runtime.incident_workspace.record_action(
+                incident_id, description=request.action_description, occurred_at=request.occurred_at,
+                performed_by=request.performed_by, reference=request.reference,
+                idempotency_key=request.idempotency_key,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/incidents/{incident_id}/close", status_code=201)
+    def close_incident(incident_id: str, request: IncidentClosureRequest) -> dict:
+        try:
+            return app.state.runtime.incident_workspace.close(
+                incident_id, reason=request.reason, context=request.supporting_context,
+                idempotency_key=request.idempotency_key,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/incidents/{incident_id}/reopen", status_code=201)
+    def reopen_incident(incident_id: str, request: IncidentReopenRequest) -> dict:
+        try:
+            return app.state.runtime.incident_workspace.reopen(
+                incident_id, reason=request.reason, idempotency_key=request.idempotency_key,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/incidents/{incident_id}/investigations", status_code=202)
     def investigate_incident(incident_id: str, request: IncidentInvestigationRequest) -> dict:
