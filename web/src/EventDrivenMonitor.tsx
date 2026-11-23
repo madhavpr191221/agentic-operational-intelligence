@@ -9,6 +9,8 @@ type Run = {
   created_at: string
   config: Record<string, unknown>
   error?: string | null
+  recovered_after_restart?: boolean
+  replay_checkpoint?: { simulated_at?: string; window_index?: number; event_index?: number } | null
 }
 type StreamEvent = {
   sequence: number
@@ -225,13 +227,17 @@ export default function EventDrivenMonitor({ onOpenInbox }: { onOpenInbox: () =>
           return
         }
 
-        // A plain page load prepares the demo controls. It must not silently
-        // choose a random replay or start an OpenAI investigation.
-        const activeRuns = recent.filter((item) => Number(item.config.monitor_history_windows ?? 0) > 0
-          && ['preparing', 'running', 'queued', 'paused', 'stopping'].includes(item.status))
-        await Promise.all(activeRuns.map((item) => jsonRequest(
-          `/api/runs/${encodeURIComponent(item.run_id)}/controls/stop`, { method: 'POST' },
-        ).catch(() => undefined)))
+        // Restore an existing seeded replay instead of silently stopping it.
+        // A replay recovered after an API restart is deliberately paused until
+        // the operator chooses Resume.
+        const activeReplay = recent.find((item) => Number(item.config.monitor_history_windows ?? 0) > 0
+          && item.recovered_after_restart)
+          ?? recent.find((item) => Number(item.config.monitor_history_windows ?? 0) > 0
+            && ['preparing', 'running', 'queued', 'paused', 'stopping'].includes(item.status))
+        if (activeReplay) {
+          await loadRun(activeReplay.run_id)
+          return
+        }
         setRun(null)
         setEvents([])
         setIncidents([])
@@ -465,6 +471,11 @@ export default function EventDrivenMonitor({ onOpenInbox }: { onOpenInbox: () =>
         <p className="page-subtitle">Synthetic data · detector watches ticket counts; the investigator follows emitted alerts.</p></div>
         <div className="replay-status"><span className={`status-dot ${run?.status ?? 'ready'}`} />Synthetic replay · {statusLabel}<small>{run ? (liveWeek ? `${streamCompletedWindows}/144 stream windows · ${formatReplayClock(latestProgress?.payload.simulated_at ?? latestProgress?.simulated_at)}` : `${observations.length} windows completed`) : 'No replay started'}</small></div></div>
       {error && <div className="error-banner"><span>!</span>{error}<button onClick={() => setError('')}>Dismiss</button></div>}
+
+      {run?.recovered_after_restart && <div className="recovered-run-banner" role="status">
+        <strong>Replay recovered after app restart · paused</strong>
+        <span>The same synthetic run is restored at {formatReplayClock(run.replay_checkpoint?.simulated_at)}. Resume when ready. Queued investigations and notification delivery recover independently and may continue in the background.</span>
+      </div>}
 
       <details className="replay-setup" open={!run}>
         <summary>{run ? 'Replay settings' : 'Choose a demo and start'}</summary>

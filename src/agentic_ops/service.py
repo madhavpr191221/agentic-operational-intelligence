@@ -152,15 +152,15 @@ class RunControl:
     step_budget: int = 0
     pause_started_at: float | None = None
     paused_seconds: float = 0.0
+    shutdown_requested: bool = False
+    recovered_after_restart: bool = False
     thread: threading.Thread | None = None
 
 
 class OperationsRuntime:
     def __init__(self, store: EventStore | None = None, investigator: Investigator | None = None):
         self.store = store or EventStore()
-        # A replay's clock and controls live in this process. Persisted running
-        # rows cannot be resumed safely after a process restart.
-        self.store.stop_interrupted_runs()
+        recovered_runs = self.store.recover_interrupted_runs()
         self.evidence = EvidenceTools(self.store)
         # Initialize the additive incident/outbox schema even before a replay exists.
         DetectorHost(self.store, "schema-bootstrap", CategoryDetectorSuite("poisson", 48, CATEGORIES))
@@ -173,17 +173,42 @@ class OperationsRuntime:
         self.notifications = NotificationCoordinator(self.store)
         self.notifications.start()
         self.incident_workspace = IncidentWorkspace(self.store, self.notifications.settings.operator_name)
+        self._resume_recovered_runs(recovered_runs)
+
+    def _resume_recovered_runs(self, run_ids: list[str]) -> None:
+        """Restore interrupted seeded replays in a paused state."""
+        for run_id in run_ids:
+            run = self.store.get_run(run_id)
+            if not run:
+                continue
+            config_values = {key: value for key, value in run["config"].items()
+                             if key in SimulationConfig.__dataclass_fields__}
+            config = SimulationConfig(**config_values)
+            control = RunControl(paused=True, recovered_after_restart=True)
+            with self._lock:
+                self._controls[run_id] = control
+            thread = threading.Thread(target=self._run_simulation, args=(run_id, config, control), daemon=True,
+                                      name=f"simulation-recovered-{run_id[:8]}")
+            control.thread = thread
+            thread.start()
 
     def stop(self) -> None:
         """Stop background workers when the API process shuts down."""
         with self._lock:
-            controls = list(self._controls.values())
-        for control in controls:
+            controls = list(self._controls.items())
+        for run_id, control in controls:
             with control.condition:
-                control.stopped = True
-                control.paused = False
+                run = self.store.get_run(run_id)
+                if control.stopped:
+                    self.store.set_run_status(run_id, "stopped")
+                elif (run
+                        and int(run.get("config", {}).get("monitor_history_windows", 0)) > 0):
+                    control.shutdown_requested = True
+                else:
+                    control.stopped = True
+                    control.paused = False
                 control.condition.notify_all()
-        for control in controls:
+        for _, control in controls:
             if control.thread and control.thread.is_alive():
                 control.thread.join(timeout=5)
         self.notifications.stop()
@@ -296,20 +321,23 @@ class OperationsRuntime:
             self.store.set_run_status(run_id, "failed", str(exc))
 
     def _store_generated_event(self, run_id: str, generated: GeneratedEvent,
-                               replay_phase: str | None = None) -> dict[str, Any]:
+                               replay_phase: str | None = None,
+                               evidence_id: str | None = None) -> dict[str, Any]:
         payload = dict(generated.payload)
         if replay_phase is not None:
             payload["replay_phase"] = replay_phase
         return self.store.add_event(run_id, generated.simulated_at, generated.source,
-                                    generated.event_type, payload)
+                                    generated.event_type, payload, evidence_id=evidence_id)
 
     def _process_window(self, run_id: str, config: SimulationConfig, window: GeneratedWindow,
                         detector_host: DetectorHost, automatic: bool) -> None:
+        observation_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"replay:{run_id}:window:{window.index}:observation"))
         observation = self.store.add_event(
             run_id, window.end, "detector", "window_observation",
             {"schema_version": 1, "window_index": window.index,
              "window_start": window.start, "window_end": window.end,
              "ticket_count": window.ticket_count, "category_counts": window.category_counts},
+            evidence_id=observation_id,
         )
         count_observation = CountObservation(
             window_index=window.index, window_start=window.start, window_end=window.end,
@@ -324,13 +352,18 @@ class OperationsRuntime:
              "calibration": window.index < config.calibration_windows,
              "observation_evidence_id": observation["evidence_id"],
              "detection_result": detection},
+            evidence_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"replay:{run_id}:window:{window.index}:score")),
         )
-        transition_by_category = {
-            event["category"]: event["episode"]
-            for event in detector_host.pending_events()
-            if event["window"]["window_index"] == window.index
-            and event["event_type"] in {"episode_opened", "episode_updated"}
-        }
+        with self.store._connection() as db:
+            transition_rows = db.execute(
+                "SELECT payload_json FROM episode_outbox WHERE stream_id=? AND window_index=? ORDER BY rowid",
+                (run_id, window.index),
+            ).fetchall()
+        transition_by_category = {}
+        for row in transition_rows:
+            event = json.loads(row["payload_json"])
+            if event["event_type"] in {"episode_opened", "episode_updated"}:
+                transition_by_category[event["category"]] = event["episode"]
         for category, result in detection["categories"].items():
             if not result["alerted"]:
                 continue
@@ -360,7 +393,9 @@ class OperationsRuntime:
                                   "statistical_episode": transition_by_category.get(category),
                                   "detectors_triggered": triggered,
                                   "observation_evidence_id": observation["evidence_id"],
-                                  "window_score_evidence_id": score_event["evidence_id"]})
+                                  "window_score_evidence_id": score_event["evidence_id"]},
+                                 evidence_id=str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                                            f"replay:{run_id}:window:{window.index}:alert:{category}")))
         detector_host.deliver_pending(automatic=automatic)
         detector_host.observe_completed_window(count_observation, automatic=automatic)
 
@@ -409,6 +444,7 @@ class OperationsRuntime:
                 "detector_baseline_ready" if baseline["baseline_ready"] else "detector_baseline_status",
                 {**baseline, "history_start": baseline_snapshot["history_start"],
                  "history_end": baseline_snapshot["history_end"], "baseline_cache": cache_status},
+                evidence_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"replay:{run_id}:baseline")),
             )
 
         if not stream:
@@ -424,18 +460,44 @@ class OperationsRuntime:
         if simulated_span_seconds <= 0:
             raise ValueError("Live replay stream must have a positive simulated duration")
 
+        checkpoint = self.store.get_replay_checkpoint(run_id)
+        if checkpoint is None:
+            checkpoint = {
+                "window_index": history_end, "event_index": 0,
+                "current_window_counts": {category: 0 for category in CATEGORIES},
+                "simulated_at": stream_start.isoformat().replace("+00:00", "Z"),
+                "completed_windows": 0,
+            }
+            self.store.save_replay_checkpoint(run_id, checkpoint)
         with control.condition:
+            if control.paused and control.pause_started_at is None:
+                control.pause_started_at = time.monotonic()
             self.store.set_run_status(run_id, "paused" if control.paused else "running")
-        wall_start = time.monotonic()
-        self._emit_replay_progress(run_id, stream_start, history_end,
-                                   {category: 0 for category in CATEGORIES}, 0.0)
+        checkpoint_time = datetime.fromisoformat(checkpoint["simulated_at"].replace("Z", "+00:00"))
+        elapsed_at_checkpoint = max(0.0, min(simulated_span_seconds,
+                                             (checkpoint_time - stream_start).total_seconds()))
+        wall_start = time.monotonic() - playback_seconds * elapsed_at_checkpoint / simulated_span_seconds
+        checkpoint_progress = min(1.0, elapsed_at_checkpoint / simulated_span_seconds)
+        self._emit_replay_progress(
+            run_id, checkpoint_time, int(checkpoint["window_index"]),
+            {category: int(checkpoint["current_window_counts"].get(category, 0)) for category in CATEGORIES},
+            checkpoint_progress,
+        )
         last_progress = wall_start
 
         for window in stream:
-            current_counts = {category: 0 for category in CATEGORIES}
+            if window.index < int(checkpoint["window_index"]):
+                continue
+            current_counts = ({category: int(checkpoint["current_window_counts"].get(category, 0))
+                              for category in CATEGORIES}
+                             if window.index == int(checkpoint["window_index"])
+                             else {category: 0 for category in CATEGORIES})
+            first_event = int(checkpoint["event_index"]) if window.index == int(checkpoint["window_index"]) else 0
             window_end = datetime.fromisoformat(window.end.replace("Z", "+00:00"))
             stepped = False
-            for generated in window.events:
+            for event_index, generated in enumerate(window.events):
+                if event_index < first_event:
+                    continue
                 event_time = datetime.fromisoformat(generated.simulated_at.replace("Z", "+00:00"))
                 target_offset = (event_time - stream_start).total_seconds()
                 target_wall_elapsed = playback_seconds * target_offset / simulated_span_seconds
@@ -448,14 +510,31 @@ class OperationsRuntime:
                     if state == "stopped":
                         self.store.set_run_status(run_id, "stopped")
                         return
+                    if state == "shutdown":
+                        self.store.set_run_status(run_id, "paused")
+                        return
                     if state == "step":
                         stepped = True
                         last_progress = time.monotonic()
-                self._store_generated_event(run_id, generated, "stream")
+                next_counts = dict(current_counts)
                 if generated.event_type == "ticket_created":
                     category = str(generated.payload.get("category", ""))
-                    if category in current_counts:
-                        current_counts[category] += 1
+                    if category in next_counts:
+                        next_counts[category] += 1
+                next_checkpoint = {
+                    "window_index": window.index, "event_index": event_index + 1,
+                    "current_window_counts": next_counts,
+                    "simulated_at": generated.simulated_at,
+                    "completed_windows": int(checkpoint.get("completed_windows", 0)),
+                }
+                event_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                          f"replay:{run_id}:window:{window.index}:event:{event_index}"))
+                payload = dict(generated.payload)
+                payload["replay_phase"] = "stream"
+                self.store.record_replay_event(run_id, generated.simulated_at, generated.source,
+                                               generated.event_type, payload, event_id, next_checkpoint)
+                current_counts = next_counts
+                checkpoint = next_checkpoint
 
             target_offset = (window_end - stream_start).total_seconds()
             target_wall_elapsed = playback_seconds * target_offset / simulated_span_seconds
@@ -468,6 +547,9 @@ class OperationsRuntime:
                 if state == "stopped":
                     self.store.set_run_status(run_id, "stopped")
                     return
+                if state == "shutdown":
+                    self.store.set_run_status(run_id, "paused")
+                    return
                 if state == "step":
                     stepped = True
             if current_counts != window.category_counts:
@@ -477,6 +559,13 @@ class OperationsRuntime:
             self._process_window(run_id, config, window, detector_host, automatic)
             completed = window.index - history_end + 1
             percent = completed / len(stream)
+            checkpoint = {
+                "window_index": window.index + 1, "event_index": 0,
+                "current_window_counts": {category: 0 for category in CATEGORIES},
+                "simulated_at": window.end,
+                "completed_windows": completed,
+            }
+            self.store.save_replay_checkpoint(run_id, checkpoint)
             self._emit_replay_progress(run_id, window_end, window.index + 1,
                                        {category: 0 for category in CATEGORIES}, percent)
             last_progress = time.monotonic()
@@ -487,6 +576,12 @@ class OperationsRuntime:
                         control.pause_started_at = time.monotonic()
                     self.store.set_run_status(run_id, "paused")
 
+        self.store.save_replay_checkpoint(run_id, {
+            "window_index": config.window_count, "event_index": 0,
+            "current_window_counts": {category: 0 for category in CATEGORIES},
+            "simulated_at": stream_end.isoformat().replace("+00:00", "Z"),
+            "completed_windows": len(stream),
+        })
         self._emit_replay_progress(run_id, stream_end, config.window_count,
                                    {category: 0 for category in CATEGORIES}, 1.0)
         self.store.set_run_status(run_id, "completed")
@@ -500,6 +595,8 @@ class OperationsRuntime:
             with control.condition:
                 if control.stopped:
                     return "stopped", last_progress
+                if control.shutdown_requested:
+                    return "shutdown", last_progress
                 if control.paused:
                     if control.step_budget > 0:
                         control.step_budget -= 1
@@ -556,6 +653,8 @@ class OperationsRuntime:
                     control.paused_seconds += time.monotonic() - control.pause_started_at
                     control.pause_started_at = None
                 control.paused = False
+                with self.store._connection() as db:
+                    db.execute("UPDATE runs SET recovered_after_restart=0 WHERE run_id=?", (run_id,))
                 self.store.set_run_status(run_id, "running")
                 control.condition.notify_all()
             elif action == "step":
@@ -564,6 +663,8 @@ class OperationsRuntime:
                     control.pause_started_at = time.monotonic()
                 control.step_budget += 1
                 self.store.set_run_status(run_id, "paused")
+                with self.store._connection() as db:
+                    db.execute("UPDATE runs SET recovered_after_restart=0 WHERE run_id=?", (run_id,))
                 control.condition.notify_all()
             elif action == "stop":
                 control.stopped = True

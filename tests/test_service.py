@@ -1,6 +1,9 @@
 import tempfile
 import time
 import unittest
+import uuid
+from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,7 +12,7 @@ from agentic_ops.domain import RCAReport, SimulationConfig
 from agentic_ops.detector_host import list_incidents
 from agentic_ops.service import OperationsRuntime
 from agentic_ops.service import RunControl
-from agentic_ops.simulation import GeneratedWindow
+from agentic_ops.simulation import GeneratedEvent, GeneratedWindow
 from agentic_ops.store import EventStore
 
 
@@ -86,11 +89,9 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(reused["payload"]["baseline_cache"], "reused")
         self.assertEqual(self.runtime.store.get_run(second_run)["status"], "completed")
 
-    def test_new_runtime_stops_persisted_replay_from_previous_process(self):
-        run_id = self.runtime.store.create_run("healthy", 42, "poisson", {
-            "monitor_history_windows": 192,
-        })
-        self.runtime.store.set_run_status(run_id, "paused")
+    def test_new_runtime_stops_interrupted_non_resumable_run(self):
+        run_id = self.runtime.store.create_run("healthy", 42, "poisson", {"investigation_mode": "manual"})
+        self.runtime.store.set_run_status(run_id, "running")
         restarted_runtime = OperationsRuntime(self.runtime.store, MockInvestigator())
         try:
             recovered = self.runtime.store.get_run(run_id)
@@ -98,6 +99,78 @@ class RuntimeTests(unittest.TestCase):
             self.assertIn("application restart", recovered["error"])
         finally:
             restarted_runtime.stop()
+
+    def test_live_replay_resumes_from_event_checkpoint_without_duplicate_ticket(self):
+        config = SimulationConfig(scenario="healthy", seed=42, window_count=3, calibration_windows=1,
+                                  monitor_history_windows=1, playback_duration_seconds=0.1)
+        history = GeneratedWindow(0, "2026-01-01T00:00:00Z", "2026-01-01T00:30:00Z", 23,
+                                 {"payments": 5, "orders": 8, "account": 4, "delivery": 6}, [])
+        first = GeneratedEvent("2026-01-01T00:31:00Z", "support_tickets", "ticket_created",
+                               {"category": "payments", "title": "First released ticket"})
+        second = GeneratedEvent("2026-01-01T00:32:00Z", "support_tickets", "ticket_created",
+                                {"category": "payments", "title": "Next ticket"})
+        windows = [
+            history,
+            GeneratedWindow(1, "2026-01-01T00:30:00Z", "2026-01-01T01:00:00Z", 1,
+                            {"payments": 1, "orders": 0, "account": 0, "delivery": 0}, [first]),
+            GeneratedWindow(2, "2026-01-01T01:00:00Z", "2026-01-01T01:30:00Z", 1,
+                            {"payments": 1, "orders": 0, "account": 0, "delivery": 0}, [second]),
+        ]
+        run_id = self.runtime.store.create_run("healthy", 42, "poisson",
+                                               {**asdict(config), "investigation_mode": "manual"})
+        self.runtime.store.set_run_status(run_id, "running")
+        released_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"replay:{run_id}:window:1:event:0"))
+        self.runtime.store.record_replay_event(
+            run_id, first.simulated_at, first.source, first.event_type,
+            {**first.payload, "replay_phase": "stream", "window_index": 1}, released_id,
+            {"window_index": 1, "event_index": 1,
+             "current_window_counts": {"payments": 1, "orders": 0, "account": 0, "delivery": 0},
+             "simulated_at": first.simulated_at, "completed_windows": 0},
+        )
+        with patch("agentic_ops.service.generate_live_week", return_value=windows), \
+             patch("agentic_ops.service.generate_live_stream", return_value=windows[1:]):
+            restarted_runtime = OperationsRuntime(self.runtime.store, MockInvestigator())
+            try:
+                recovered = self.runtime.store.get_run(run_id)
+                self.assertEqual(recovered["status"], "paused")
+                self.assertTrue(recovered["recovered_after_restart"])
+                restarted_runtime.control_run(run_id, "resume")
+                result = restarted_runtime.wait_for_run(run_id, timeout=5)
+                self.assertEqual(result["status"], "completed", result.get("error"))
+                tickets = [event for event in self.runtime.store.list_events(run_id, limit=500)
+                           if event["event_type"] == "ticket_created"]
+                self.assertEqual(len(tickets), 2)
+                self.assertEqual(len({event["evidence_id"] for event in tickets}), 2)
+                observations = [event for event in self.runtime.store.list_events(run_id, limit=500)
+                                if event["event_type"] == "window_observation"]
+                self.assertEqual([event["payload"]["window_index"] for event in observations], [0, 1, 2])
+            finally:
+                restarted_runtime.stop()
+
+    def test_reprocessing_completed_live_window_does_not_duplicate_detector_events(self):
+        config = SimulationConfig(scenario="payment_issue", seed=42, window_count=5,
+                                  calibration_windows=4)
+        run_id = self.runtime.store.create_run("payment_issue", 42, "poisson", asdict(config))
+        from agentic_ops.detection import CategoryDetectorSuite
+        from agentic_ops.detector_host import DetectorHost
+        host = DetectorHost(self.runtime.store, run_id,
+                            CategoryDetectorSuite("poisson", 4, ("payments", "orders", "account", "delivery")))
+        for index in range(5):
+            counts = {"payments": 40 if index == 4 else 4,
+                      "orders": 8, "account": 4, "delivery": 6}
+            start = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=index * 30)
+            end = start + timedelta(minutes=30)
+            window = GeneratedWindow(index, start.isoformat().replace("+00:00", "Z"),
+                                     end.isoformat().replace("+00:00", "Z"), sum(counts.values()), counts, [])
+            self.runtime._process_window(run_id, config, window, host, automatic=False)
+            if index == 4:
+                self.runtime._process_window(run_id, config, window, host, automatic=False)
+        events = self.runtime.store.list_events(run_id, limit=500)
+        for event_type in ("window_observation", "window_score", "anomaly_alert"):
+            matching = [event for event in events if event["event_type"] == event_type
+                        and event["payload"].get("window_index") == 4]
+            self.assertEqual(len(matching), 1, event_type)
+        self.assertEqual(len(list_incidents(self.runtime.store, run_id)), 1)
 
     def test_operator_investigation_returns_cited_report(self):
         config = SimulationConfig(seed=4, window_count=52, calibration_windows=20,

@@ -102,6 +102,11 @@ class EventStore:
                     applied_at TEXT NOT NULL
                 );
             """)
+            run_columns = {row["name"] for row in connection.execute("PRAGMA table_info(runs)")}
+            if "replay_checkpoint_json" not in run_columns:
+                connection.execute("ALTER TABLE runs ADD COLUMN replay_checkpoint_json TEXT")
+            if "recovered_after_restart" not in run_columns:
+                connection.execute("ALTER TABLE runs ADD COLUMN recovered_after_restart INTEGER NOT NULL DEFAULT 0")
 
     def get_live_replay_baseline(self, cache_key: str) -> dict[str, Any] | None:
         with self._connection() as connection:
@@ -265,7 +270,8 @@ class EventStore:
         run_id = str(uuid.uuid4())
         with self._connection() as connection:
             connection.execute(
-                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+                "INSERT INTO runs (run_id,created_at,scenario,seed,arrival_model,status,config_json,error) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
                 (run_id, utc_now(), scenario, seed, arrival_model, "queued", json.dumps(config)),
             )
         return run_id
@@ -294,16 +300,77 @@ class EventStore:
         return json.loads(row[0]) if row else None
 
     def add_event(self, run_id: str, simulated_at: str, source: str, event_type: str,
-                  payload: dict[str, Any]) -> dict[str, Any]:
-        evidence_id = str(uuid.uuid4())
+                  payload: dict[str, Any], evidence_id: str | None = None) -> dict[str, Any]:
+        evidence_id = evidence_id or str(uuid.uuid4())
+        payload_json = json.dumps(payload)
         with self._connection() as connection:
-            cursor = connection.execute(
-                "INSERT INTO events(evidence_id,run_id,simulated_at,source,event_type,payload_json) VALUES(?,?,?,?,?,?)",
-                (evidence_id, run_id, simulated_at, source, event_type, json.dumps(payload)),
+            connection.execute(
+                "INSERT OR IGNORE INTO events(evidence_id,run_id,simulated_at,source,event_type,payload_json) VALUES(?,?,?,?,?,?)",
+                (evidence_id, run_id, simulated_at, source, event_type, payload_json),
             )
-            sequence = cursor.lastrowid
+            row = connection.execute("SELECT * FROM events WHERE evidence_id=?", (evidence_id,)).fetchone()
+            if (row is None or row["run_id"] != run_id or row["simulated_at"] != simulated_at
+                    or row["source"] != source or row["event_type"] != event_type
+                    or json.loads(row["payload_json"]) != payload):
+                raise ValueError("Stable event identity was reused for different event content")
+            sequence = row["sequence"]
         return {"sequence": sequence, "evidence_id": evidence_id, "run_id": run_id,
                 "simulated_at": simulated_at, "source": source, "event_type": event_type, "payload": payload}
+
+    def record_replay_event(self, run_id: str, simulated_at: str, source: str, event_type: str,
+                            payload: dict[str, Any], evidence_id: str,
+                            checkpoint: dict[str, Any]) -> dict[str, Any]:
+        """Atomically persist a released replay event and its next cursor."""
+        payload_json = json.dumps(payload)
+        checkpoint_json = json.dumps(checkpoint, separators=(",", ":"), ensure_ascii=False)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "INSERT OR IGNORE INTO events(evidence_id,run_id,simulated_at,source,event_type,payload_json) VALUES(?,?,?,?,?,?)",
+                (evidence_id, run_id, simulated_at, source, event_type, payload_json),
+            )
+            row = connection.execute("SELECT * FROM events WHERE evidence_id=?", (evidence_id,)).fetchone()
+            if (row is None or row["run_id"] != run_id or row["simulated_at"] != simulated_at
+                    or row["source"] != source or row["event_type"] != event_type
+                    or json.loads(row["payload_json"]) != payload):
+                raise ValueError("Stable event identity was reused for different event content")
+            connection.execute("UPDATE runs SET replay_checkpoint_json=? WHERE run_id=?",
+                               (checkpoint_json, run_id))
+            return {"sequence": row["sequence"], "evidence_id": evidence_id, "run_id": run_id,
+                    "simulated_at": simulated_at, "source": source, "event_type": event_type,
+                    "payload": payload}
+
+    def get_replay_checkpoint(self, run_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute("SELECT replay_checkpoint_json FROM runs WHERE run_id=?", (run_id,)).fetchone()
+        return json.loads(row[0]) if row and row[0] else None
+
+    def save_replay_checkpoint(self, run_id: str, checkpoint: dict[str, Any]) -> None:
+        with self._connection() as connection:
+            connection.execute("UPDATE runs SET replay_checkpoint_json=? WHERE run_id=?",
+                               (json.dumps(checkpoint, separators=(",", ":"), ensure_ascii=False), run_id))
+
+    def recover_interrupted_runs(self) -> list[str]:
+        """Pause seeded live replays for operator resume; stop non-resumable runs."""
+        recovered: list[str] = []
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT run_id,status,config_json FROM runs WHERE status IN ('queued','preparing','running','paused','stopping')"
+            ).fetchall()
+            for row in rows:
+                config = json.loads(row["config_json"])
+                if int(config.get("monitor_history_windows", 0)) > 0:
+                    connection.execute(
+                        "UPDATE runs SET status='paused',error=NULL,recovered_after_restart=1 WHERE run_id=?",
+                        (row["run_id"],),
+                    )
+                    recovered.append(row["run_id"])
+                else:
+                    connection.execute(
+                        "UPDATE runs SET status='stopped',error='Replay interrupted by application restart.' WHERE run_id=?",
+                        (row["run_id"],),
+                    )
+        return recovered
 
     def list_events(self, run_id: str, after_sequence: int = 0, limit: int = 500) -> list[dict[str, Any]]:
         with self._connection() as connection:
@@ -375,7 +442,10 @@ class EventStore:
             return None
         return {"run_id": row["run_id"], "created_at": row["created_at"], "scenario": row["scenario"],
                 "seed": row["seed"], "arrival_model": row["arrival_model"], "status": row["status"],
-                "config": json.loads(row["config_json"]), "error": row["error"]}
+                "config": json.loads(row["config_json"]), "error": row["error"],
+                "recovered_after_restart": bool(row["recovered_after_restart"]),
+                "replay_checkpoint": json.loads(row["replay_checkpoint_json"])
+                if row["replay_checkpoint_json"] else None}
 
     def list_runs(self, limit: int = 20) -> list[dict[str, Any]]:
         with self._connection() as connection:
