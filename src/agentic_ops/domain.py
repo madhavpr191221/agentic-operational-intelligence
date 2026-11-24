@@ -92,6 +92,16 @@ class Recommendation:
 
 
 @dataclass
+class RelationshipAssessment:
+    title: str
+    shared_system: str
+    explanation: str
+    status: Literal["possible", "reaffirmed", "weakened", "withdrawn"]
+    incident_ids: list[str]
+    supporting_evidence_by_incident: dict[str, list[str]] = field(default_factory=dict)
+
+
+@dataclass
 class RCAReport:
     status: Literal["completed", "abstained", "incomplete", "failed"]
     summary: str
@@ -104,6 +114,7 @@ class RCAReport:
     recommendations: list[Recommendation] = field(default_factory=list)
     episode_summaries: list[dict[str, Any]] = field(default_factory=list)
     search_activity: list[dict[str, Any]] = field(default_factory=list)
+    relationship_assessments: list[RelationshipAssessment] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

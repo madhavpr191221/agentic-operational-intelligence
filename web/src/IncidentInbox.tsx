@@ -26,9 +26,14 @@ type Investigation = {
     episode_started_at: string; latest_window_end: string; alert_windows: number; tickets: number
     latest_finding?: string | null; finding_cutoff?: string | null}>
 }
+type Relationship = { group_id: string; status: 'possible' | 'reaffirmed' | 'weakened' | 'withdrawn'
+  current_version: number; shared_system: string; title: string; explanation: string
+  members: Array<{incident_id: string; category: string; operational_status: string}>
+  supporting_records: Record<string, Array<{evidence_id: string; source: string; observed_at: string; summary: string}>>
+  history: Array<{version: number; status: string; assessed_at: string}> }
 type Detail = Incident & {
   statistics: {alert_windows: number; tickets: number; expected: number; peak_window_tickets?: number}
-  investigations: Investigation[]; actions: TimelineEntry[]; lifecycle_history: TimelineEntry[]
+  investigations: Investigation[]; relationships: Relationship[]; actions: TimelineEntry[]; lifecycle_history: TimelineEntry[]
   monitoring: {ticket_windows: Array<{window_index: number; window_start: string; window_end: string; tickets: number; usual?: number}>
     service_health: Array<{observed_at: string; service?: string; level?: string; message?: string; errors?: number; requests?: number}>}
   operator_name: string
@@ -276,6 +281,19 @@ export default function IncidentInbox({ onOpenMonitor }: { onOpenMonitor: () => 
             <div className="incident-metric-row"><div><span>ALERT WINDOWS</span><strong>{detail.statistics.alert_windows}</strong></div><div><span>TICKETS</span><strong>{detail.statistics.tickets}</strong></div><div><span>EXPECTED</span><strong>{detail.statistics.expected.toFixed(1)}</strong></div><div><span>PEAK WINDOW</span><strong>{detail.statistics.peak_window_tickets ?? '—'}</strong></div></div>
             {selectedAttention ? <section className={`workspace-attention attention-${selectedAttention.level}`}><div className="workspace-attention-heading"><strong>{urgencyLabel(selectedAttention.level)} · attention assessment</strong>{selectedAttention.level === 'immediate' && !selectedAttention.acknowledged_at && selectedAttention.notification_id && <button className="secondary-button" disabled={ackBusy} onClick={() => void acknowledge()}>{ackBusy ? 'Saving…' : 'Acknowledge'}</button>}</div><p>{selectedAttention.rationale}</p>{selectedAttention.level === 'immediate' && <p className="attention-ack-state">{selectedAttention.acknowledged_at ? `Acknowledged by ${selectedAttention.acknowledged_by} · app time ${appTime(selectedAttention.acknowledged_at)}` : `Needs acknowledgement by app time ${appTime(selectedAttention.acknowledgement_deadline)}`}</p>}</section>
               : <section className="workspace-attention attention-pending"><div className="workspace-attention-heading"><strong>Priority assessment pending</strong></div><p>The alert is visible. No urgency assessment has been recorded yet.</p></section>}
+
+            <section className="workspace-section relationship-section"><div className="workspace-section-heading"><div><div className="section-kicker">CROSS-CATEGORY CONTEXT</div><h3>Related incidents</h3></div><span>{detail.relationships.length ? `${detail.relationships.length} relationship group${detail.relationships.length === 1 ? '' : 's'}` : 'No supported links'}</span></div>
+              {detail.relationships.length === 0 ? <p className="workspace-note">Alerts at similar times do not prove a connection. A relationship appears here only when retrieved evidence names the same specific service, dependency, or change for each incident.</p>
+                : detail.relationships.map((relationship) => <article className={`relationship-card relationship-${relationship.status}`} key={relationship.group_id}>
+                  <div className="relationship-card-heading"><strong>{relationship.title}</strong><span>{relationship.status.toUpperCase()} · version {relationship.current_version}</span></div>
+                  <p><strong>Shared system:</strong> {relationship.shared_system}</p><p>{relationship.explanation}</p>
+                  <div className="relationship-members">{relationship.members.map((member) => <div key={member.incident_id}><strong>{member.category}</strong><span>Incident {member.operational_status}</span>
+                    {(relationship.supporting_records[member.incident_id] ?? []).map((record) => <small key={record.evidence_id}>{record.source} · replay {time(record.observed_at)} · {record.summary}</small>)}
+                    {member.incident_id !== detail.incident_id && <button className="secondary-button" onClick={() => { setFilter('all'); setSelectedId(member.incident_id) }}>Open incident</button>}
+                  </div>)}</div>
+                  {relationship.history.length > 1 && <details><summary>Assessment history ({relationship.history.length} versions)</summary><ol>{relationship.history.map((item) => <li key={item.version}>Version {item.version} · {item.status} · app time {appTime(item.assessed_at)}</li>)}</ol></details>}
+                </article>)}
+            </section>
 
             <section className="workspace-section"><div className="workspace-section-heading"><div><div className="section-kicker">INVESTIGATION</div><h3>Findings and evidence scope</h3></div></div>
               {detail.investigations.length === 0 && <p className="inbox-empty">No investigation is recorded yet.</p>}

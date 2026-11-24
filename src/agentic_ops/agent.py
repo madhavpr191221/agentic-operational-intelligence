@@ -15,7 +15,8 @@ from agents import Agent, Runner, function_tool
 from agents.exceptions import MaxTurnsExceeded
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
-from agentic_ops.domain import CATEGORIES, CategoryFinding, EvidenceRef, Hypothesis, RCAReport, Recommendation
+from agentic_ops.domain import (CATEGORIES, CategoryFinding, EvidenceRef, Hypothesis, RCAReport,
+                                Recommendation, RelationshipAssessment)
 from agentic_ops.evidence import EvidenceTools
 from agentic_ops.search_activity import summarize_search_trace
 
@@ -59,11 +60,22 @@ class HypothesisNote(BaseModel):
     categories: list[str] = Field(min_length=1, max_length=len(CATEGORIES))
 
 
+class RelationshipNote(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str
+    shared_system: str
+    explanation: str
+    status: Literal["possible", "reaffirmed", "weakened", "withdrawn"]
+    incident_ids: list[str] = Field(min_length=2, max_length=4)
+    supporting_evidence_by_incident: dict[str, list[str]]
+
+
 class InvestigationNotes(BaseModel):
     model_config = ConfigDict(extra="forbid")
     summary: str
     hypotheses: list[HypothesisNote]
     unresolved_questions: list[str]
+    possible_relationships: list[RelationshipNote] = Field(default_factory=list, max_length=4)
 
 
 class Investigator:
@@ -268,8 +280,12 @@ class OpenAIInvestigator(Investigator):
                                                  if signal.get("category") in CATEGORIES)) or ["payments"]
         signal_by_category = {str(signal.get("category")): signal for signal in signals}
         cross_category_context = (alert_context or {}).get("cross_category_context", [])
+        primary_incident_context = (alert_context or {}).get("primary_incident_context", {})
         cross_context_by_id = {str(item.get("incident_id")): item for item in cross_category_context
                                if isinstance(item, dict) and item.get("incident_id")}
+        if isinstance(primary_incident_context, dict) and primary_incident_context.get("incident_id"):
+            cross_context_by_id[str(primary_incident_context["incident_id"])] = primary_incident_context
+        cross_evidence_by_incident: dict[str, set[str]] = {}
 
         def selected_episode(category: str) -> dict[str, Any]:
             if category not in selected_categories:
@@ -407,12 +423,19 @@ class OpenAIInvestigator(Investigator):
                 raise ValueError("Choose an incident from the frozen cross-category context.")
             start_at = str(related["episode_started_at"])
             end_at = str(related["latest_window_end"])
+            def retrieve_related() -> dict[str, Any]:
+                result = evidence_tools.search_cross_category_records(
+                    run_id, query, str(related["category"]), start_at, end_at, limit)
+                cross_evidence_by_incident.setdefault(incident_id, set()).update(
+                    str(record["evidence_id"]) for record in result.get("records", [])
+                    if isinstance(record, dict) and record.get("evidence_id"))
+                return result
+
             return run_tool(
                 "search_cross_category_evidence",
                 {"incident_id": incident_id, "category": related["category"], "query": query,
                  "start_at": start_at, "end_at": end_at, "limit": limit},
-                lambda: evidence_tools.search_cross_category_records(
-                    run_id, query, str(related["category"]), start_at, end_at, limit),
+                retrieve_related,
             )
 
         @function_tool(name_override="query_service_health", description_override=(
@@ -516,7 +539,9 @@ class OpenAIInvestigator(Investigator):
                 "those selected categories and return candidate notes tagged with their categories. "
                 "cross_category_context is a compact navigation index of other unresolved incidents known at this job's cutoff, not evidence of a shared cause. "
                 "Only when a concrete clue from the selected incident may also explain a listed incident, use search_cross_category_evidence for targeted underlying records. "
-                "Do not infer a relationship from timing, ticket counts, or the context summary itself; cite the retrieved records and preserve uncertainty. "
+                "To propose a relationship, retrieve a specific shared service, dependency, or change within the evidence interval of the selected incident and every related incident. "
+                "Put a possible_relationship only when the returned underlying records for every incident independently mention the same specific shared_system; cite those record handles under the matching incident IDs. "
+                "Do not infer a relationship from timing, ticket counts, or the context summary itself; preserve uncertainty. "
                 "The signals already contain the detector outputs; do not recompute statistics. Interpret Z-score, "
                 "CUSUM, and log-likelihood ratio as distinct detector evidence, not values to add together. "
                 "Use the supplied episode summary for the full episode trend and equal-duration baseline as context. "
@@ -567,7 +592,8 @@ class OpenAIInvestigator(Investigator):
         input_signals = _with_citation_aliases(signals, aliases_by_evidence, evidence_by_alias)
         run_input = json.dumps({"operator_question": question, "selected_signals": input_signals,
                                 "selected_categories": selected_categories,
-                                "cross_category_context": cross_category_context}, ensure_ascii=False)
+                                "cross_category_context": cross_category_context,
+                                "primary_incident_context": primary_incident_context}, ensure_ascii=False)
         try:
             streaming = Runner.run_streamed(agent, input=run_input, max_turns=self.MAX_TURNS)
             async for event in streaming.stream_events():
@@ -579,7 +605,10 @@ class OpenAIInvestigator(Investigator):
                 raise ValueError("The investigator did not return structured investigation notes.")
             report = await self._compose_report(question, signals, selected_categories, notes, evidence_by_id,
                                                 evidence_records, evidence_by_alias, trace,
-                                                budget_reached, on_progress)
+                                                budget_reached, on_progress,
+                                                primary_incident_context=primary_incident_context,
+                                                incident_context_by_id=cross_context_by_id,
+                                                cross_evidence_by_incident=cross_evidence_by_incident)
             report.episode_summaries = [signal["episode_summary"] for signal in signals
                                         if isinstance(signal.get("episode_summary"), dict)]
             report.search_activity = summarize_search_trace(trace)
@@ -608,7 +637,10 @@ class OpenAIInvestigator(Investigator):
                               evidence_by_id: dict[str, EvidenceRef],
                               evidence_records: dict[str, dict[str, Any]], aliases: dict[str, str],
                               trace: list[dict[str, Any]], budget_reached: bool,
-                              on_progress: ProgressCallback) -> RCAReport:
+                              on_progress: ProgressCallback,
+                              primary_incident_context: dict[str, Any] | None = None,
+                              incident_context_by_id: dict[str, dict[str, Any]] | None = None,
+                              cross_evidence_by_incident: dict[str, set[str]] | None = None) -> RCAReport:
         if not aliases:
             status = "incomplete" if budget_reached else "abstained"
             findings = [CategoryFinding(category, status,
@@ -718,10 +750,50 @@ class OpenAIInvestigator(Investigator):
             summary = "Evidence search reached its safety ceiling; this investigation is partial. " + summary
         if not unresolved:
             unresolved = content.unresolved_questions or notes.unresolved_questions
+        relationship_assessments: list[RelationshipAssessment] = []
+        primary_context = primary_incident_context or {}
+        allowed_contexts = incident_context_by_id or {}
+        cross_evidence = cross_evidence_by_incident or {}
+        primary_id = str(primary_context.get("incident_id", ""))
+        for candidate in notes.possible_relationships:
+            incident_ids = list(dict.fromkeys(candidate.incident_ids))
+            if (not primary_id or primary_id not in incident_ids or len(incident_ids) < 2
+                    or any(value not in allowed_contexts for value in incident_ids)
+                    or len({allowed_contexts[value].get("category") for value in incident_ids}) < 2):
+                continue
+            shared_system = candidate.shared_system.strip()
+            if not shared_system or len(shared_system) > 160:
+                continue
+            support_by_incident: dict[str, list[str]] = {}
+            supported = True
+            for incident_id in incident_ids:
+                handles = candidate.supporting_evidence_by_incident.get(incident_id, [])
+                resolved = list(dict.fromkeys(value for handle in handles
+                                               if (value := _resolve_citation(handle, valid_ids, aliases))))
+                retrieved = cross_evidence.get(incident_id, set())
+                if not resolved or not set(resolved).issubset(retrieved):
+                    supported = False
+                    break
+                for evidence_id in resolved:
+                    record = evidence_records.get(evidence_id, {})
+                    payload_text = json.dumps(record.get("payload", {}), ensure_ascii=False).casefold()
+                    if shared_system.casefold() not in payload_text:
+                        supported = False
+                        break
+                if not supported:
+                    break
+                support_by_incident[incident_id] = resolved
+            if supported:
+                relationship_assessments.append(RelationshipAssessment(
+                    title=candidate.title[:240], shared_system=shared_system,
+                    explanation=candidate.explanation[:1200], status=candidate.status,
+                    incident_ids=incident_ids, supporting_evidence_by_incident=support_by_incident,
+                ))
         return RCAReport(status=status, summary=summary, hypotheses=hypotheses,
                          evidence=list(evidence_by_id.values()), unresolved_questions=unresolved,
                          tool_trace=trace, category_findings=category_findings,
-                         recommendations=_recommendations_from_trace(trace, selected_categories, valid_ids))
+                         recommendations=_recommendations_from_trace(trace, selected_categories, valid_ids),
+                         relationship_assessments=relationship_assessments)
 
 
 def _constrained_report_type(citation_ids: list[str], categories: list[str]) -> type[BaseModel]:

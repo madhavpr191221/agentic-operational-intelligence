@@ -315,9 +315,19 @@ class IncidentWorker:
         signal = {"evidence_id": alert["evidence_id"], "simulated_at": alert["simulated_at"],
                   **alert["payload"], "episode_start_window_index": start,
                   "episode_end_window_index": end, "focus_window_index": end, "episode_summary": summary}
+        primary_incident_context = {
+            "incident_id": job["incident_id"], "category": category,
+            "episode_status": episode.get("status", "active"),
+            "operational_status": "open",
+            "episode_started_at": summary["start_at"],
+            "latest_window_end": summary["end_at"],
+            "alert_windows": summary["alert_window_count"],
+            "tickets": summary["total_tickets"],
+        }
         context = {"selected_signals": [signal], "categories": [category],
                    "episode_summaries": [summary],
                    "cross_category_context": json.loads(job.get("cross_category_context_json") or "[]"),
+                   "primary_incident_context": primary_incident_context,
                    **signal}
         investigator = self.investigator()
         report = investigator.investigate(job["stream_id"], "What is driving this ticket spike?", tools, context)
@@ -338,11 +348,106 @@ class IncidentWorker:
                        (json.dumps(payload), now, job["job_id"], job["fence_token"], now))
             if not result.rowcount:
                 return False
-            incident_id = db.execute("SELECT incident_id FROM incident_jobs WHERE job_id=?", (job["job_id"],)).fetchone()[0]
+            committed_job = db.execute("SELECT * FROM incident_jobs WHERE job_id=?", (job["job_id"],)).fetchone()
+            incident_id = committed_job["incident_id"]
             revision = db.execute("SELECT COALESCE(MAX(revision),0)+1 FROM incident_report_revisions WHERE incident_id=?",
                                   (incident_id,)).fetchone()[0]
             db.execute("INSERT INTO incident_report_revisions VALUES (?,?,?)", (incident_id, revision, job["job_id"]))
+            _persist_relationship_assessments(db, dict(committed_job), payload, now)
             snapshot = db.execute("SELECT cutoff,sequence_bound FROM incident_jobs WHERE job_id=?", (job["job_id"],)).fetchone()
             db.execute("DELETE FROM pending_investigation_followups WHERE incident_id=? AND cutoff<=? AND sequence_bound<=?",
                        (incident_id, snapshot["cutoff"], snapshot["sequence_bound"]))
             return True
+
+
+def _persist_relationship_assessments(db: Any, job: dict[str, Any],
+                                     report: dict[str, Any], now: str) -> None:
+    """Persist only cited relationships whose shared system is observed for every member."""
+    primary_id = str(job["incident_id"])
+    allowed = {primary_id}
+    allowed.update(str(item.get("incident_id")) for item in
+                   json.loads(job.get("cross_category_context_json") or "[]")
+                   if isinstance(item, dict) and item.get("incident_id"))
+    context_rows = db.execute(
+        "SELECT incident_id,stream_id,category FROM incidents WHERE incident_id IN ("
+        + ",".join("?" for _ in allowed) + ")", tuple(allowed),
+    ).fetchall() if allowed else []
+    contexts = {row["incident_id"]: dict(row) for row in context_rows}
+    report_evidence = {str(item.get("evidence_id")) for item in report.get("evidence", [])
+                       if isinstance(item, dict) and item.get("evidence_id")}
+    cross_records: dict[str, dict[str, dict[str, Any]]] = {}
+    for entry in report.get("tool_trace", []):
+        if not isinstance(entry, dict) or entry.get("tool") != "search_cross_category_evidence":
+            continue
+        incident_id = str(entry.get("arguments", {}).get("incident_id", ""))
+        result = entry.get("result", {})
+        for record in result.get("records", []) if isinstance(result, dict) else []:
+            if isinstance(record, dict) and record.get("evidence_id"):
+                cross_records.setdefault(incident_id, {})[str(record["evidence_id"])] = record
+
+    seen_group_ids: set[str] = set()
+    for assessment in report.get("relationship_assessments", []):
+        if not isinstance(assessment, dict):
+            continue
+        incident_ids = list(dict.fromkeys(str(value) for value in assessment.get("incident_ids", [])))
+        if (len(incident_ids) < 2 or primary_id not in incident_ids
+                or len(incident_ids) > 4 or any(value not in allowed for value in incident_ids)):
+            continue
+        members = [contexts.get(value) for value in incident_ids]
+        if any(member is None or member["stream_id"] != job["stream_id"] for member in members):
+            continue
+        if len({member["category"] for member in members if member}) < 2:
+            continue
+        shared_system = str(assessment.get("shared_system", "")).strip()
+        if not shared_system or len(shared_system) > 160:
+            continue
+        support = assessment.get("supporting_evidence_by_incident", {})
+        if not isinstance(support, dict) or set(support) != set(incident_ids):
+            continue
+        valid_support: dict[str, list[str]] = {}
+        valid = True
+        for member_id in incident_ids:
+            evidence_ids = list(dict.fromkeys(str(value) for value in support.get(member_id, [])))
+            available = cross_records.get(member_id, {})
+            if not evidence_ids or not set(evidence_ids).issubset(report_evidence | set(available)):
+                valid = False
+                break
+            if not set(evidence_ids).issubset(available):
+                valid = False
+                break
+            if any(shared_system.casefold() not in json.dumps(available[value].get("payload", {}),
+                                                                ensure_ascii=False).casefold()
+                   for value in evidence_ids):
+                valid = False
+                break
+            valid_support[member_id] = evidence_ids
+        if not valid:
+            continue
+        status = str(assessment.get("status", "possible"))
+        if status not in {"possible", "reaffirmed", "weakened", "withdrawn"}:
+            continue
+        group_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                  f"aoi:relationship:{job['stream_id']}:{shared_system.casefold()}:{','.join(sorted(incident_ids))}"))
+        if group_id in seen_group_ids:
+            continue
+        seen_group_ids.add(group_id)
+        existing = db.execute("SELECT current_version FROM incident_relationship_groups WHERE group_id=?",
+                              (group_id,)).fetchone()
+        if existing is None and status != "possible":
+            continue
+        version = (int(existing["current_version"]) if existing else 0) + 1
+        db.execute("INSERT OR IGNORE INTO incident_relationship_groups "
+                   "(group_id,stream_id,shared_system,status,current_version,created_at,updated_at) "
+                   "VALUES (?,?,?,?,?,?,?)",
+                   (group_id, job["stream_id"], shared_system, status, version, now, now))
+        db.executemany("INSERT OR IGNORE INTO incident_relationship_members (group_id,incident_id) VALUES (?,?)",
+                       [(group_id, value) for value in incident_ids])
+        db.execute("INSERT INTO incident_relationship_versions "
+                   "(group_id,version,source_incident_id,source_job_id,assessed_at,status,title,explanation,supporting_evidence_json) "
+                   "VALUES (?,?,?,?,?,?,?,?,?)",
+                   (group_id, version, primary_id, job["job_id"], now, status,
+                    str(assessment.get("title", "Possible shared operational issue"))[:240],
+                    str(assessment.get("explanation", ""))[:1200],
+                    json.dumps(valid_support, sort_keys=True)))
+        db.execute("UPDATE incident_relationship_groups SET status=?,current_version=?,updated_at=? WHERE group_id=?",
+                   (status, version, now, group_id))

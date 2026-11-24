@@ -103,6 +103,23 @@ class DetectorHost:
             db.execute("CREATE TABLE IF NOT EXISTS incident_report_revisions ("
                        "incident_id TEXT NOT NULL, revision INTEGER NOT NULL, job_id TEXT NOT NULL UNIQUE, "
                        "PRIMARY KEY (incident_id,revision), FOREIGN KEY (job_id) REFERENCES incident_jobs(job_id))")
+            db.execute("CREATE TABLE IF NOT EXISTS incident_relationship_groups ("
+                       "group_id TEXT PRIMARY KEY, stream_id TEXT NOT NULL, shared_system TEXT NOT NULL, "
+                       "status TEXT NOT NULL, current_version INTEGER NOT NULL DEFAULT 0, "
+                       "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS incident_relationship_members ("
+                       "group_id TEXT NOT NULL REFERENCES incident_relationship_groups(group_id), "
+                       "incident_id TEXT NOT NULL REFERENCES incidents(incident_id), "
+                       "PRIMARY KEY (group_id,incident_id))")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_relationship_members_incident "
+                       "ON incident_relationship_members(incident_id)")
+            db.execute("CREATE TABLE IF NOT EXISTS incident_relationship_versions ("
+                       "group_id TEXT NOT NULL REFERENCES incident_relationship_groups(group_id), "
+                       "version INTEGER NOT NULL, source_incident_id TEXT NOT NULL REFERENCES incidents(incident_id), "
+                       "source_job_id TEXT NOT NULL REFERENCES incident_jobs(job_id), assessed_at TEXT NOT NULL, "
+                       "status TEXT NOT NULL, title TEXT NOT NULL, explanation TEXT NOT NULL, "
+                       "supporting_evidence_json TEXT NOT NULL, "
+                       "PRIMARY KEY (group_id,version))")
             old_reports = db.execute("SELECT job_id,incident_id FROM incident_jobs WHERE status='completed' "
                                      "AND report_json IS NOT NULL AND job_id NOT IN "
                                      "(SELECT job_id FROM incident_report_revisions) ORDER BY created_at,rowid").fetchall()

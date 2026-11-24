@@ -170,6 +170,7 @@ class IncidentWorkspace:
             result = dict(incident)
             result["episode"] = json.loads(result.pop("episode_json"))
             result["statistics"] = self._episode_statistics(db, result)
+            result["relationships"] = self._relationships(db, incident_id)
             result["investigations"] = []
             for job in db.execute(
                     "SELECT j.job_id,j.reason,j.cutoff,j.status,j.created_at,j.completed_at,j.error,"
@@ -190,6 +191,46 @@ class IncidentWorkspace:
             result["monitoring"] = self._monitoring(db, result)
             result["operator_name"] = self.operator_name
             return result
+
+    @staticmethod
+    def _relationships(db: Any, incident_id: str) -> list[dict[str, Any]]:
+        rows = db.execute(
+            "SELECT g.*,v.version,v.source_incident_id,v.source_job_id,v.assessed_at,"
+            "v.status AS assessment_status,v.title,v.explanation,v.supporting_evidence_json "
+            "FROM incident_relationship_members m "
+            "JOIN incident_relationship_groups g ON g.group_id=m.group_id "
+            "JOIN incident_relationship_versions v ON v.group_id=g.group_id AND v.version=g.current_version "
+            "WHERE m.incident_id=? ORDER BY g.updated_at DESC,g.group_id",
+            (incident_id,),
+        ).fetchall()
+        relationships: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            support = json.loads(item.pop("supporting_evidence_json") or "{}")
+            item["supporting_evidence_by_incident"] = support
+            item["members"] = [dict(member) for member in db.execute(
+                "SELECT i.incident_id,i.category,i.operational_status FROM incident_relationship_members m "
+                "JOIN incidents i ON i.incident_id=m.incident_id WHERE m.group_id=? ORDER BY i.category,i.incident_id",
+                (item["group_id"],),
+            ).fetchall()]
+            report_row = db.execute("SELECT report_json FROM incident_jobs WHERE job_id=?",
+                                    (item["source_job_id"],)).fetchone()
+            evidence = {}
+            if report_row and report_row["report_json"]:
+                report = json.loads(report_row["report_json"])
+                evidence = {str(record.get("evidence_id")): record for record in report.get("evidence", [])
+                            if isinstance(record, dict) and record.get("evidence_id")}
+            item["supporting_records"] = {
+                member_id: [evidence[value] for value in ids if value in evidence]
+                for member_id, ids in support.items()
+            }
+            item["history"] = [dict(version) for version in db.execute(
+                "SELECT version,status,title,explanation,assessed_at,source_incident_id,source_job_id "
+                "FROM incident_relationship_versions WHERE group_id=? ORDER BY version",
+                (item["group_id"],),
+            ).fetchall()]
+            relationships.append(item)
+        return relationships
 
     @staticmethod
     def _episode_statistics(db: Any, incident: dict[str, Any]) -> dict[str, Any]:
