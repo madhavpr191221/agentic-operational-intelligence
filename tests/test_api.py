@@ -23,7 +23,7 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(client.get("/api/incidents/missing").status_code, 404)
             scenarios = client.get("/api/scenarios").json()
             self.assertEqual({item["id"] for item in scenarios},
-                              {"payment_issue", "healthy", "unrelated_issue", "resolved_issue",
+                              {"mixed_categories", "payment_issue", "healthy", "unrelated_issue", "resolved_issue",
                               "orders_queue_backlog", "account_identity_outage",
                               "delivery_carrier_degradation"})
             runtime.stop()

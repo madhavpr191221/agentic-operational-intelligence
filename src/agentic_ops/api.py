@@ -25,7 +25,7 @@ AlertLevel = Literal["normal", "medium", "high"]
 ALERT_LEVEL_SEVERITY = {"normal": "none", "medium": "mild", "high": "severe"}
 LiveScenario = Literal[
     "payments_normal", "payments_medium", "payments_high",
-    "orders_high", "account_high", "delivery_high",
+    "orders_high", "account_high", "delivery_high", "mixed_categories",
 ]
 
 
@@ -216,6 +216,7 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
     @app.get("/api/scenarios")
     def scenarios() -> list[dict[str, str]]:
         return [
+            {"id": "mixed_categories", "label": "Mixed-category incident drivers"},
             {"id": "payment_issue", "label": "Unresolved payment failure"},
             {"id": "healthy", "label": "Healthy control"},
             {"id": "unrelated_issue", "label": "Unrelated issue distractor"},
