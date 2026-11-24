@@ -15,7 +15,7 @@ from typing import Any
 
 from dotenv import dotenv_values
 
-from agentic_ops.agent import Investigator, MockInvestigator, OpenAIInvestigator
+from agentic_ops.agent import Investigator, MockInvestigator, OpenAIInvestigator, OpenRouterInvestigator
 from agentic_ops.detection import (
     CategoryDetectorSuite,
     CountObservation,
@@ -144,6 +144,15 @@ def _load_openai_key_from_dotenv() -> None:
         os.environ["OPENAI_API_KEY"] = api_key
 
 
+def _configured_setting(name: str, default: str = "") -> str:
+    value = os.getenv(name)
+    if value and value.strip():
+        return value.strip()
+    values = dotenv_values(REPOSITORY_ROOT / ".env")
+    configured = values.get(name)
+    return str(configured).strip() if configured and str(configured).strip() else default
+
+
 @dataclass
 class RunControl:
     condition: threading.Condition = field(default_factory=threading.Condition)
@@ -218,7 +227,20 @@ class OperationsRuntime:
     def investigator_mode(self) -> str:
         if self._provided_investigator is not None:
             return getattr(self._provided_investigator, "mode", "custom")
-        return "offline_demo" if os.getenv("AGENT_MODE", "openai").casefold() == "mock" else "openai"
+        if os.getenv("AGENT_MODE", "openai").casefold() == "mock":
+            return "offline_demo"
+        return _configured_setting("AOI_LLM_PROVIDER", "openai").casefold()
+
+    @property
+    def investigator_model(self) -> str | None:
+        if self._provided_investigator is not None:
+            return getattr(self._provided_investigator, "model_name", None)
+        mode = self.investigator_mode
+        if mode == "openrouter":
+            return _configured_setting("OPENROUTER_MODEL", OpenRouterInvestigator.DEFAULT_MODEL)
+        if mode == "openai":
+            return _configured_setting("OPENAI_MODEL", "gpt-6.1-sol")
+        return None
 
     @property
     def openai_key_configured(self) -> bool:
@@ -232,16 +254,40 @@ class OperationsRuntime:
         values = dotenv_values(REPOSITORY_ROOT / ".env")
         return bool(str(values.get("OPENAI_API_KEY") or "").strip())
 
+    @property
+    def investigator_configured(self) -> bool:
+        if self._provided_investigator is not None:
+            return getattr(self._provided_investigator, "mode", "custom") not in {"offline_demo", "mock"}
+        if os.getenv("AGENT_MODE", "openai").casefold() == "mock":
+            return False
+        mode = self.investigator_mode
+        if mode == "openai":
+            return self.openai_key_configured
+        if mode == "openrouter":
+            key = _configured_setting("OPENROUTER_API_KEY")
+            model = self.investigator_model or ""
+            return bool(key and model.endswith(":free"))
+        return False
+
     def _investigator(self) -> Investigator:
         if self._provided_investigator is not None:
             return self._provided_investigator
         mode = os.getenv("AGENT_MODE", "openai").casefold()
         if mode == "mock":
             return MockInvestigator()
-        _load_openai_key_from_dotenv()
-        if not os.getenv("OPENAI_API_KEY"):
-            raise RuntimeError("Set OPENAI_API_KEY or choose AGENT_MODE=mock for an offline demo.")
-        return OpenAIInvestigator()
+        provider = self.investigator_mode
+        if provider == "openrouter":
+            api_key = _configured_setting("OPENROUTER_API_KEY")
+            if not api_key:
+                raise RuntimeError("Set OPENROUTER_API_KEY to use the OpenRouter investigator.")
+            model = self.investigator_model or OpenRouterInvestigator.DEFAULT_MODEL
+            return OpenRouterInvestigator(api_key=api_key, model=model)
+        if provider == "openai":
+            _load_openai_key_from_dotenv()
+            if not os.getenv("OPENAI_API_KEY"):
+                raise RuntimeError("Set OPENAI_API_KEY or choose AGENT_MODE=mock for an offline demo.")
+            return OpenAIInvestigator(model=self.investigator_model)
+        raise RuntimeError("AOI_LLM_PROVIDER must be 'openai' or 'openrouter'.")
 
     def start_run(self, config: SimulationConfig, investigation_mode: str = "automatic") -> dict[str, Any]:
         if investigation_mode not in {"automatic", "manual"}:

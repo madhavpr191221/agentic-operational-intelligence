@@ -12,6 +12,8 @@ from agentic_ops.simulation import LIVE_REPLAY_PROFILES, generate_live_week
 
 class FakeRuntime:
     investigator_mode = "openai"
+    investigator_configured = True
+    investigator_model = "gpt-6.1-sol"
     openai_key_configured = True
 
     def __init__(self):
@@ -25,8 +27,21 @@ def test_health_reports_key_presence_without_returning_secret():
     response = TestClient(create_app(runtime)).get("/api/health")
     assert response.status_code == 200
     assert response.json() == {
-        "status": "ok", "investigator_mode": "openai", "openai_key_configured": True,
+        "status": "ok", "investigator_mode": "openai", "investigator_configured": True,
+        "investigator_model": "gpt-6.1-sol", "openai_key_configured": True,
     }
+
+
+def test_seeded_demo_accepts_configured_openrouter_investigator():
+    runtime = FakeRuntime()
+    runtime.investigator_mode = "openrouter"
+    runtime.investigator_model = "nvidia/nemotron-3.5-super-vl:free"
+    runtime.openai_key_configured = False
+    response = TestClient(create_app(runtime)).post("/api/runs", json={
+        "randomized_week": True, "alert_level": "high",
+    })
+    assert response.status_code == 202
+    assert runtime.start_run.call_count == 1
 
 
 def test_alert_level_selects_a_matching_profile():
@@ -47,14 +62,14 @@ def test_alert_level_selects_a_matching_profile():
         assert runtime.start_run.call_args.args[1] == "automatic"
 
 
-def test_demo_does_not_start_without_openai_key():
+def test_demo_does_not_start_without_configured_investigator():
     runtime = FakeRuntime()
-    runtime.openai_key_configured = False
+    runtime.investigator_configured = False
     response = TestClient(create_app(runtime)).post("/api/runs", json={
         "randomized_week": True, "alert_level": "high",
     })
     assert response.status_code == 409
-    assert "requires an OpenAI investigator" in response.json()["detail"]
+    assert "configured automatic investigator" in response.json()["detail"]
     runtime.start_run.assert_not_called()
 
 

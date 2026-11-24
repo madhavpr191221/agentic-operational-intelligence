@@ -26,6 +26,7 @@ type Report = {
   status: string
   summary: string
   investigator_mode?: string
+  investigator_model?: string | null
   hypotheses: Array<{ rank: number; title: string; explanation: string; supporting_evidence: string[]; contradicting_evidence: string[] }>
   evidence: Evidence[]
   unresolved_questions: string[]
@@ -61,7 +62,10 @@ type Attention = {
   outbox?: Array<{recipient_role: string; recipient: string; subject: string; body: string; draft: EmailDraft
     status: string; delivery_mode: string; attempt_count: number; last_error?: string | null}>
 }
-type Health = { investigator_mode: string; openai_key_configured: boolean }
+type Health = {
+  investigator_mode: string; investigator_configured: boolean; investigator_model?: string | null
+  openai_key_configured?: boolean
+}
 type LiveScenario = 'payments_normal' | 'payments_medium' | 'payments_high' | 'orders_high' | 'account_high' | 'delivery_high' | 'mixed_categories'
 type DetectorScore = { detector: string; score: number; threshold: number; anomalous: boolean }
 type ScorePoint = { score: number; threshold: number }
@@ -390,7 +394,18 @@ export default function EventDrivenMonitor({ onOpenInbox }: { onOpenInbox: () =>
   const statusLabel = !run ? 'Ready to replay' : run.status === 'preparing' ? 'Preparing baseline'
     : run.status === 'running' ? 'Running' : run.status === 'completed' ? 'Replay complete' : run.status
   const runIsActive = Boolean(run && ['preparing', 'running', 'paused', 'stopping'].includes(run.status))
-  const openAiReady = health?.investigator_mode === 'openai' && health.openai_key_configured === true
+  const investigatorReady = health?.investigator_configured === true
+    && ['openai', 'openrouter'].includes(health.investigator_mode)
+  const investigatorName = health?.investigator_mode === 'openrouter' ? 'OpenRouter'
+    : health?.investigator_mode === 'openai' ? 'OpenAI' : 'Configured investigator'
+  const investigatorReadiness = !health ? 'Checking investigator setup…'
+    : health.investigator_mode === 'offline_demo' ? 'Automatic investigations require OpenAI or OpenRouter; offline mock mode is selected.'
+    : investigatorReady ? `${investigatorName} · ${health.investigator_model ?? 'model configured'}`
+    : health.investigator_mode === 'openrouter'
+      ? 'OpenRouter is not ready. Set OPENROUTER_API_KEY and a free OPENROUTER_MODEL ending in :free.'
+      : health.investigator_mode === 'openai'
+        ? 'OpenAI key not found. Add OPENAI_API_KEY to the project .env file.'
+        : 'Unsupported investigator provider. Set AOI_LLM_PROVIDER to openrouter or openai.'
   const countsHeading = liveWeek
     ? run?.status === 'completed'
       ? `Last window · ${formatReplayClock(latestObservation?.payload.window_start)} – ${formatReplayClock(latestObservation?.payload.window_end)}`
@@ -492,7 +507,7 @@ export default function EventDrivenMonitor({ onOpenInbox }: { onOpenInbox: () =>
             <optgroup label="Payments"><option value="payments_normal">Normal</option><option value="payments_medium">Medium spike</option><option value="payments_high">High spike</option></optgroup>
             <optgroup label="Other categories"><option value="orders_high">Orders · processing backlog</option><option value="account_high">Account · sign-in failures</option><option value="delivery_high">Delivery · carrier degradation</option></optgroup>
           </select></label>
-          <button className="primary-button" onClick={() => void startReplay()} disabled={busy || runIsActive || !openAiReady}>
+          <button className="primary-button" onClick={() => void startReplay()} disabled={busy || runIsActive || !investigatorReady}>
             {busy ? 'Preparing…' : run ? 'Start new demo' : 'Start demo'}
           </button>
         </div>
@@ -500,11 +515,9 @@ export default function EventDrivenMonitor({ onOpenInbox }: { onOpenInbox: () =>
           ? 'The seed chooses one to three hidden conditions that affect multiple categories at different times. Counts remain independently scored; co-occurring alerts do not imply a shared cause.'
           : liveScenario === 'payments_normal'
           ? 'No incident is planted; the detector still watches for unusual counts.'
-          : `${liveScenarioNames[liveScenario]} uses a seeded, single-category incident; the detector decides when it alerts.`} Four days prepare the baseline, then three days stream in about two minutes. An alert starts an OpenAI investigation automatically.</p>
-        <p className={`openai-readiness ${openAiReady ? 'is-ready' : 'is-unavailable'}`} role="status">
-          {!health ? 'Checking OpenAI setup…' : health.investigator_mode !== 'openai'
-            ? 'OpenAI is required for this demo. Restart the app without offline mock mode.'
-            : health.openai_key_configured ? 'OpenAI investigator · key detected' : 'OpenAI key not found. Add OPENAI_API_KEY to the project .env file.'}
+          : `${liveScenarioNames[liveScenario]} uses a seeded, single-category incident; the detector decides when it alerts.`} Four days prepare the baseline, then three days stream in about two minutes. An alert starts an investigation automatically.</p>
+        <p className={`openai-readiness ${investigatorReady ? 'is-ready' : 'is-unavailable'}`} role="status">
+          {investigatorReadiness}
         </p>
       </details>
 
@@ -650,7 +663,7 @@ export default function EventDrivenMonitor({ onOpenInbox }: { onOpenInbox: () =>
                 {report.search_activity?.length ? <div className="report-retrieval"><strong>Related records and guides</strong>{report.search_activity.map((activity, index) => <div key={`${activity.query}-${index}`}><span>{activity.category ?? incident.category} · “{activity.query}”</span><small>{activity.sources.map((item) => `${item.label}: ${item.error ? 'unavailable' : item.count}`).join(' · ')}</small>{activity.documents.map((doc, docIndex) => <details key={`${doc.title}-${docIndex}`}><summary>{doc.title}{doc.section_title ? ` · ${doc.section_title}` : ''}{doc.page_number ? ` · page ${doc.page_number}` : ''}</summary><p>{doc.snippet}</p></details>)}</div>)}</div> : <p>No guide or reference search was recorded.</p>}
               </details>
               {report.unresolved_questions?.length > 0 && <details className="report-unknown"><summary>What remains uncertain</summary><ul>{report.unresolved_questions.map((question, index) => <li key={index}>{question}</li>)}</ul></details>}
-              {latestJob?.status === 'completed' && <small className="report-generator">Generated with {report.investigator_mode === 'offline_demo' ? 'offline demo' : report.investigator_mode === 'openai' ? 'OpenAI' : 'configured investigator'}.</small>}
+              {latestJob?.status === 'completed' && <small className="report-generator">Generated with {report.investigator_mode === 'offline_demo' ? 'offline demo' : report.investigator_mode === 'openrouter' ? `OpenRouter · ${report.investigator_model ?? 'model unavailable'}` : report.investigator_mode === 'openai' ? `OpenAI · ${report.investigator_model ?? 'model unavailable'}` : 'configured investigator'}.</small>}
             </section>}
             {lastReport && latestJob && latestJob.job_id !== lastReport.job_id && latestJob.status !== 'completed' && <details className="previous-report"><summary>Previous report · evidence through {formatTime(lastReport.cutoff)}</summary><p>{lastReport.report?.summary}</p></details>}
           </article>

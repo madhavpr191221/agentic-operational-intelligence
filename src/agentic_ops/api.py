@@ -99,9 +99,12 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
     app.state.runtime = selected_runtime
 
     @app.get("/api/health")
-    def health() -> dict[str, str | bool]:
+    def health() -> dict[str, str | bool | None]:
         mode = app.state.runtime.investigator_mode
         return {"status": "ok", "investigator_mode": mode,
+                "investigator_configured": getattr(app.state.runtime, "investigator_configured",
+                                                    app.state.runtime.openai_key_configured),
+                "investigator_model": getattr(app.state.runtime, "investigator_model", None),
                 "openai_key_configured": app.state.runtime.openai_key_configured}
 
     @app.get("/api/incidents")
@@ -258,8 +261,10 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail="live_scenario requires a seeded live replay")
         if request.live_scenario is not None and request.alert_level is not None:
             raise HTTPException(status_code=422, detail="Choose either live_scenario or alert_level")
-        if (request.alert_level is not None or request.live_scenario is not None) and not app.state.runtime.openai_key_configured:
-            raise HTTPException(status_code=409, detail="The seeded demo requires an OpenAI investigator and configured key")
+        investigator_configured = getattr(app.state.runtime, "investigator_configured",
+                                          app.state.runtime.openai_key_configured)
+        if (request.alert_level is not None or request.live_scenario is not None) and not investigator_configured:
+            raise HTTPException(status_code=409, detail="The seeded demo requires a configured automatic investigator")
         if request.randomized_week:
             if request.seed is None:
                 severity = ALERT_LEVEL_SEVERITY.get(request.alert_level) if request.alert_level else None

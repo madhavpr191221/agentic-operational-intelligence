@@ -446,6 +446,7 @@ class IncidentWorker:
         report.search_activity = summarize_search_trace(report.tool_trace)
         payload = report.to_dict()
         payload["investigator_mode"] = getattr(investigator, "mode", "custom")
+        payload["investigator_model"] = getattr(investigator, "model_name", None)
         payload["evidence_cutoff"] = job["cutoff"]
         payload["evidence_sequence"] = job["sequence_bound"]
         self._commit_report(job, payload)
@@ -489,6 +490,7 @@ class IncidentWorker:
         report.search_activity = summarize_search_trace(report.tool_trace)
         payload = report.to_dict()
         payload["investigator_mode"] = getattr(investigator, "mode", "custom")
+        payload["investigator_model"] = getattr(investigator, "model_name", None)
         payload["evidence_cutoff"] = job["cutoff"]
         payload["evidence_sequence"] = job["sequence_bound"]
         payload["comparison_scope"] = scope

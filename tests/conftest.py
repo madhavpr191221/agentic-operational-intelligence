@@ -10,6 +10,10 @@ from agentic_ops.search_corpus import CorpusSearch, INDEX_DIR
 def disable_paid_embedding_calls(monkeypatch):
     """Keep unit tests deterministic and independent of GPU models or the built archive."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("AOI_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
 
     def fake_embed(self, texts):
         vectors = []

@@ -80,11 +80,19 @@ The model files are downloaded on first use and cached by Hugging Face. The inde
 
 If you install or repair the GPU search dependencies while the API is already running, restart the API. A saved report keeps the search result from when it was created; start a new investigation to search the archive again.
 
-For live investigations, copy `.env.example` to `.env` and set `OPENAI_API_KEY` in `.env`. OpenAI investigation is the default; the launcher clears any inherited mock-mode setting unless you pass `-Mock`.
+For automatic investigations, copy `.env.example` to `.env` and choose a provider. OpenRouter is configured for repeated free-model experiments by default in the example:
 
-The backend reads the key when an investigation job runs. The demo checks that an OpenAI key is configured before it lets you start, and runs investigations automatically when alerts appear. Starting a demo that emits alerts can use OpenAI API credits. You may set `OPENAI_MODEL` in the shell to choose a model. Keep `.env` private; it is ignored by Git.
+```dotenv
+AOI_LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=your-openrouter-key
+OPENROUTER_MODEL=nvidia/nemotron-3.5-super-vl:free
+```
 
-The live workflow uses one OpenAI Agents SDK agent with a bounded adaptive tool loop, followed by one structured report-composition pass with no tools. The offline mock demonstrates the same report and activity UI without calling a model.
+To use OpenAI instead, set `AOI_LLM_PROVIDER=openai`, add `OPENAI_API_KEY`, and optionally set `OPENAI_MODEL`. The app does not switch providers automatically or fall back from a free model to a paid one. Keep `.env` private; it is ignored by Git. The launcher clears inherited mock mode unless you pass `-Mock`.
+
+The live workflow uses the OpenAI Agents SDK with a bounded adaptive tool loop, followed by one structured report-composition pass with no tools. OpenRouter uses its OpenAI-compatible Chat Completions endpoint; the selected provider and model are shown with investigation reports. Offline mock mode demonstrates the same report and activity UI without calling a model.
+
+OpenRouter free models are rate limited (currently 20 requests per minute and 50 per day on the free tier); an investigation may make multiple requests, and failed requests count toward the limit. The selected model must be a free model ID ending in `:free`. OpenRouter/provider availability can vary. Use synthetic demo data only.
 
 Incident attention is separate from detector scoring and investigation: the monitor marks incidents **Immediate**, **Review soon**, or **Monitor** and explains the evidence. Immediate conditions use trusted critical service telemetry or fresh tickets plus independently collected critical telemetry. The exact structured email saved to the SQLite outbox is previewable in the incident card; simulated mode is the default and never sends network email. To opt into SMTP, set `AOI_EMAIL_MODE=smtp` and configure the `AOI_SMTP_*`, `AOI_PRIMARY_EMAIL`, and `AOI_BACKUP_EMAIL` values in `.env`. Set `AOI_APP_URL` to the operator-facing application URL for working incident links (defaults to `http://127.0.0.1:5173`). SMTP server acceptance is recorded as dispatched, not as confirmed delivery. Policy cutoffs in `.env.example` are configurable demo defaults, not validated operational standards.
 

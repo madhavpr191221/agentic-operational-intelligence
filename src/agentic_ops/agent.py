@@ -11,7 +11,8 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from agents import Agent, Runner, function_tool
+from agents import (Agent, AsyncOpenAI, OpenAIChatCompletionsModel, Runner, function_tool,
+                    set_tracing_disabled)
 from agents.exceptions import MaxTurnsExceeded
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
@@ -256,8 +257,13 @@ class OpenAIInvestigator(Investigator):
     MAX_TOOL_CALLS = 32
     MAX_CALLS_PER_TOOL = 8
 
-    def __init__(self, model: str | None = None):
-        self.model = model or os.getenv("OPENAI_MODEL", "gpt-6.1-sol")
+    def __init__(self, model: str | None = None, *, chat_client: AsyncOpenAI | None = None,
+                 mode: str | None = None):
+        self.model_name = model or os.getenv("OPENAI_MODEL", "gpt-6.1-sol")
+        self.mode = mode or type(self).mode
+        self.model = (OpenAIChatCompletionsModel(model=self.model_name, openai_client=chat_client)
+                     if chat_client else self.model_name)
+
 
     def investigate(self, run_id: str, question: str, evidence_tools: EvidenceTools,
                     alert_context: dict[str, Any] | None = None,
@@ -994,3 +1000,19 @@ def _collect_evidence_refs(value: Any, target: dict[str, EvidenceRef]) -> None:
     elif isinstance(value, (list, tuple)):
         for child in value:
             _collect_evidence_refs(child, target)
+
+
+class OpenRouterInvestigator(OpenAIInvestigator):
+    """OpenRouter-backed investigator using a pinned free model through Chat Completions."""
+
+    mode = "openrouter"
+    BASE_URL = "https://openrouter.ai/api/v1"
+    DEFAULT_MODEL = "nvidia/nemotron-3.5-super-vl:free"
+
+    def __init__(self, api_key: str, model: str | None = None):
+        model_name = model or self.DEFAULT_MODEL
+        if not model_name.endswith(":free"):
+            raise ValueError("OpenRouter model must be a free model ID ending in :free.")
+        set_tracing_disabled(disabled=True)
+        client = AsyncOpenAI(api_key=api_key, base_url=self.BASE_URL)
+        super().__init__(model_name, chat_client=client, mode=self.mode)
