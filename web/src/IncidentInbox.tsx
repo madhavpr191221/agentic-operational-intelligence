@@ -21,6 +21,10 @@ type TimelineEntry = {
 type Investigation = {
   job_id: string; reason: string; cutoff: string; status: string; created_at: string
   completed_at?: string | null; revision?: number | null; report?: any
+  cross_category_context?: Array<{incident_id: string; category: string; episode_status: string
+    operational_status: string; episode_start_window: number; episode_end_window: number
+    episode_started_at: string; latest_window_end: string; alert_windows: number; tickets: number
+    latest_finding?: string | null; finding_cutoff?: string | null}>
 }
 type Detail = Incident & {
   statistics: {alert_windows: number; tickets: number; expected: number; peak_window_tickets?: number}
@@ -284,6 +288,14 @@ export default function IncidentInbox({ onOpenMonitor }: { onOpenMonitor: () => 
                 return <article className="investigation-revision" key={job.job_id}>
                   <div className="revision-heading"><strong>{job.revision ? `Revision ${job.revision}` : job.reason}</strong><span>{job.status}</span></div>
                   <small>Evidence cutoff · replay time {time(job.cutoff)} · {job.completed_at ? `completed · app time ${appTime(job.completed_at)}` : `queued · app time ${appTime(job.created_at)}`}</small>
+                  {!!job.cross_category_context?.length && <details className="cross-category-context">
+                    <summary>Other open incidents available at this cutoff ({job.cross_category_context.length})</summary>
+                    <p className="workspace-note">This compact index helps the investigator find relevant context. It is not evidence of a shared cause.</p>
+                    <ul>{job.cross_category_context.map((context) => <li key={context.incident_id}>
+                      <strong>{context.category}</strong> · {context.alert_windows} alert windows · {context.tickets} tickets · replay {time(context.episode_started_at)}–{time(context.latest_window_end)}
+                      {context.latest_finding && <p>Latest finding available through {time(context.finding_cutoff)}: {context.latest_finding}</p>}
+                    </li>)}</ul>
+                  </details>}
                   {report && <>
                     <h4>{hypothesis?.title ?? (report.status === 'abstained' ? 'Evidence remains inconclusive' : 'Investigation findings')}</h4>
                     <p>{report.summary}</p>

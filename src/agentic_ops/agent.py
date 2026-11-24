@@ -267,6 +267,9 @@ class OpenAIInvestigator(Investigator):
         selected_categories = list(dict.fromkeys(str(signal.get("category")) for signal in signals
                                                  if signal.get("category") in CATEGORIES)) or ["payments"]
         signal_by_category = {str(signal.get("category")): signal for signal in signals}
+        cross_category_context = (alert_context or {}).get("cross_category_context", [])
+        cross_context_by_id = {str(item.get("incident_id")): item for item in cross_category_context
+                               if isinstance(item, dict) and item.get("incident_id")}
 
         def selected_episode(category: str) -> dict[str, Any]:
             if category not in selected_categories:
@@ -394,6 +397,24 @@ class OpenAIInvestigator(Investigator):
                             "sources": selected_sources, "limit": limit, "lookback_hours": lookback_hours,
                             "expansion_reason": expansion_reason}, search_selected_sources)
 
+        @function_tool(name_override="search_cross_category_evidence", description_override=(
+            "Search underlying ticket, service-log, issue, and change records for a specific other incident "
+            "listed in the frozen cross-category context. Results stay within that incident interval and this job cutoff."))
+        def search_cross_category_evidence(incident_id: str, query: str, limit: int = 5) -> str:
+            """Retrieve targeted evidence for a snapshotted incident without changing report scope."""
+            related = cross_context_by_id.get(incident_id)
+            if related is None:
+                raise ValueError("Choose an incident from the frozen cross-category context.")
+            start_at = str(related["episode_started_at"])
+            end_at = str(related["latest_window_end"])
+            return run_tool(
+                "search_cross_category_evidence",
+                {"incident_id": incident_id, "category": related["category"], "query": query,
+                 "start_at": start_at, "end_at": end_at, "limit": limit},
+                lambda: evidence_tools.search_cross_category_records(
+                    run_id, query, str(related["category"]), start_at, end_at, limit),
+            )
+
         @function_tool(name_override="query_service_health", description_override=(
             "Inspect structured service error counts and rates around the selected focus group, "
             "plus matching service-log records. Numeric telemetry is filtered structurally, not embedded."))
@@ -493,6 +514,9 @@ class OpenAIInvestigator(Investigator):
                 "Investigate the selected synthetic operational signal using only the read-only evidence tools. "
                 "The selected_signals input contains validated alert episodes, deterministic episode summaries, and one operator-selected focus window per category. Investigate only "
                 "those selected categories and return candidate notes tagged with their categories. "
+                "cross_category_context is a compact navigation index of other unresolved incidents known at this job's cutoff, not evidence of a shared cause. "
+                "Only when a concrete clue from the selected incident may also explain a listed incident, use search_cross_category_evidence for targeted underlying records. "
+                "Do not infer a relationship from timing, ticket counts, or the context summary itself; cite the retrieved records and preserve uncertainty. "
                 "The signals already contain the detector outputs; do not recompute statistics. Interpret Z-score, "
                 "CUSUM, and log-likelihood ratio as distinct detector evidence, not values to add together. "
                 "Use the supplied episode summary for the full episode trend and equal-duration baseline as context. "
@@ -522,7 +546,7 @@ class OpenAIInvestigator(Investigator):
                 "Do not claim causality is proven or infer hidden scenario truth. "
                 "Synthetic scenario truth is hidden and must not be inferred from scenario names."
             ),
-        tools=[search_evidence, query_service_health, analyze_customer_tickets,
+        tools=[search_evidence, search_cross_category_evidence, query_service_health, analyze_customer_tickets,
                compare_incident_context, build_incident_timeline, get_runbook_guidance],
             output_type=InvestigationNotes,
         )
@@ -542,7 +566,8 @@ class OpenAIInvestigator(Investigator):
                     "focus_window_index": episode.get("focus_window_index")}, "result": episode})
         input_signals = _with_citation_aliases(signals, aliases_by_evidence, evidence_by_alias)
         run_input = json.dumps({"operator_question": question, "selected_signals": input_signals,
-                                "selected_categories": selected_categories}, ensure_ascii=False)
+                                "selected_categories": selected_categories,
+                                "cross_category_context": cross_category_context}, ensure_ascii=False)
         try:
             streaming = Runner.run_streamed(agent, input=run_input, max_turns=self.MAX_TURNS)
             async for event in streaming.stream_events():

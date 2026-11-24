@@ -374,6 +374,20 @@ class EvidenceTools:
                                         category, start_at, end_at)
         return self._result(ranked, "records")
 
+    def search_cross_category_records(self, run_id: str, query: str, category: str,
+                                      start_at: str, end_at: str,
+                                      limit: int = 5) -> dict[str, Any]:
+        """Find targeted records for one snapshotted incident and its alert interval."""
+        sources = ("support_tickets", "product_logs", "issue_tracker", "change_log")
+        event_types = ("ticket_created", "service_log_summary", "issue_created",
+                       "issue_updated", "issue_resolved", "change_record")
+        records = self.store.search_events(run_id, sources, query, max(1, min(limit, 10)),
+                                           event_types, start_at, end_at)
+        records = [item for item in records
+                   if item["source"] != "support_tickets"
+                   or item["payload"].get("category") == category]
+        return self._result(records, "records")
+
     def search_operational_docs(self, run_id: str, query: str, category: str,
                                 end_at: str | None = None,
                                 limit: int = 8) -> dict[str, Any]:
