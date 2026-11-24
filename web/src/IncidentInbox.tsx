@@ -7,6 +7,10 @@ type Incident = {
   latest_investigation?: Pick<Investigation, 'job_id' | 'reason' | 'cutoff' | 'status' | 'created_at' | 'completed_at'> | null
 }
 type ReplayRun = { run_id: string; created_at: string; scenario: string; seed: number; status: string }
+type ComparisonJob = { job_id: string; stream_id: string; status: string; cutoff: string; created_at: string
+  completed_at?: string | null; error?: string | null; selected_incident_ids: string[]
+  scope: Array<{incident_id: string; category: string; episode_start_window: number; episode_end_window: number}>
+  report?: any }
 type Notification = {
   incident_id: string; level: 'immediate' | 'review_soon' | 'monitor'; rationale: string
   operational_status?: string
@@ -93,6 +97,10 @@ export default function IncidentInbox({ onOpenMonitor }: { onOpenMonitor: () => 
   const [incidents, setIncidents] = useState<Incident[]>([])
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [runs, setRuns] = useState<ReplayRun[]>([])
+  const [comparisons, setComparisons] = useState<ComparisonJob[]>([])
+  const [comparisonSelection, setComparisonSelection] = useState<string[]>([])
+  const [comparisonBusy, setComparisonBusy] = useState(false)
+  const [comparisonNotice, setComparisonNotice] = useState('')
   const [selectedId, setSelectedId] = useState('')
   const [detail, setDetail] = useState<Detail | null>(null)
   const [filter, setFilter] = useState<'open' | 'resolved' | 'all'>('open')
@@ -122,12 +130,15 @@ export default function IncidentInbox({ onOpenMonitor }: { onOpenMonitor: () => 
       const latestRun = runList[0]
       const streamQuery = scope === 'current'
         ? `?stream_id=${encodeURIComponent(latestRun?.run_id ?? '__no_current_replay__')}` : ''
-      const [list, attention] = await Promise.all([
+      const [list, attention, compareList] = await Promise.all([
         request<Incident[]>(`/api/incidents${streamQuery}`), request<{items: Notification[]}>(`/api/notifications${streamQuery}`),
+        request<ComparisonJob[]>(`/api/comparisons${streamQuery}`),
       ])
       setRuns(runList)
       setIncidents(list)
       setNotifications(attention.items)
+      setComparisons(compareList)
+      setComparisonSelection((current) => current.filter((id) => list.some((item) => item.incident_id === id)))
       const ordered = orderIncidents(list, attention.items)
       const filtered = ordered.filter((item) => filter === 'all'
         || item.operational_status === (filter === 'resolved' ? 'resolved' : 'open'))
@@ -156,6 +167,32 @@ export default function IncidentInbox({ onOpenMonitor }: { onOpenMonitor: () => 
   const visible = useMemo(() => incidents.filter((incident) => filter === 'all'
     || (filter === 'open' ? incident.operational_status === 'open' : incident.operational_status === 'resolved'))
     .sort((a, b) => compareIncidentPriority(a, b, attentionByIncident)), [attentionByIncident, filter, incidents])
+  const selectedForComparison = incidents.filter((item) => comparisonSelection.includes(item.incident_id))
+  const compareCategories = new Set(selectedForComparison.map((item) => item.category))
+  const compareStreams = new Set(selectedForComparison.map((item) => item.stream_id))
+  const canCompare = selectedForComparison.length >= 2 && selectedForComparison.length <= 4
+    && compareCategories.size >= 2 && compareStreams.size === 1
+
+  const toggleComparisonSelection = (incidentId: string) => {
+    setComparisonNotice('')
+    setComparisonSelection((current) => current.includes(incidentId)
+      ? current.filter((value) => value !== incidentId)
+      : current.length < 4 ? [...current, incidentId] : current)
+  }
+
+  const requestSelectedComparison = async () => {
+    if (!canCompare || comparisonBusy) return
+    setComparisonBusy(true)
+    try {
+      const job = await request<ComparisonJob>('/api/comparisons', { method: 'POST', body: JSON.stringify({
+        incident_ids: selectedForComparison.map((item) => item.incident_id), idempotency_key: crypto.randomUUID(),
+      }) })
+      setComparisonNotice(`Comparison ${job.status}. Scope and evidence cutoff are frozen; incident reports stay unchanged.`)
+      setComparisonSelection([])
+      await refresh()
+    } catch (issue) { setError(issue instanceof Error ? issue.message : 'Could not queue the comparison.') }
+    finally { setComparisonBusy(false) }
+  }
   const immediateNeedsAck = notifications.filter((item) => item.level === 'immediate'
     && item.operational_status === 'open' && !item.acknowledged_at).length
   const openCount = incidents.filter((item) => item.operational_status === 'open').length
@@ -253,15 +290,47 @@ export default function IncidentInbox({ onOpenMonitor }: { onOpenMonitor: () => 
         <article className="panel inbox-stat"><span>INVESTIGATING</span><strong>{investigatingCount}</strong><small>Queued or running investigations</small></article>
       </section>
 
+      <section className="panel comparison-panel" aria-label="Requested incident comparisons">
+        <div className="comparison-panel-heading"><div><div className="section-kicker">OPTIONAL OPERATOR REQUEST</div><h2>Compare selected incidents</h2></div>
+          <span>{comparisons.length} saved comparison{comparisons.length === 1 ? '' : 's'}</span></div>
+        <p className="workspace-note">Select 2–4 incidents from different categories in the same replay. The comparison is a separate result; incident reports and lifecycles stay independent.</p>
+        {comparisonNotice && <p className="comparison-notice" role="status">{comparisonNotice}</p>}
+        {comparisonSelection.length > 0 && <div className="comparison-selection"><span>{selectedForComparison.map((item) => item.category).join(' + ')}</span>
+          <button className="primary-button" disabled={!canCompare || comparisonBusy} onClick={() => void requestSelectedComparison()}>
+            {comparisonBusy ? 'Queueing comparison…' : `Compare ${comparisonSelection.length} selected`}</button>
+        </div>}
+        {comparisons.length === 0 ? <p className="inbox-empty">No comparisons requested.</p> : <div className="comparison-results">
+          {comparisons.slice(0, 4).map((job) => <article className="comparison-result" key={job.job_id}>
+            <div className="revision-heading"><strong>{job.scope.map((item) => item.category).join(' + ')} comparison</strong><span>{job.status}</span></div>
+            <small>Evidence cutoff · replay time {time(job.cutoff)} · {job.completed_at ? `completed · app time ${appTime(job.completed_at)}` : `requested · app time ${appTime(job.created_at)}`}</small>
+            {job.error && <p className="workspace-note">{job.error}</p>}
+            {job.report && <><p>{job.report.summary}</p>
+              {!!job.report.category_findings?.length && <ul>{job.report.category_findings.map((finding: any, index: number) =>
+                <li key={`${finding.category}-${index}`}><strong>{finding.category}:</strong> {finding.title} — {finding.explanation}</li>)}</ul>}
+              {!!job.report.relationship_assessments?.length && job.report.relationship_assessments.map((item: any, index: number) =>
+                <p key={index}><strong>Possible relationship ({item.status}):</strong> {item.shared_system}. {item.explanation}</p>)}
+              <details><summary>Comparison evidence and uncertainty</summary>
+                <ul>{(job.report.evidence ?? []).slice(0, 12).map((evidence: any) => <li key={evidence.evidence_id}>{evidence.source} · replay {time(evidence.observed_at)} · {evidence.summary}</li>)}</ul>
+                <ul>{(job.report.unresolved_questions ?? []).map((question: string, index: number) => <li key={index}>{question}</li>)}</ul>
+              </details></>}
+          </article>)}
+        </div>}
+      </section>
+
       <div className="inbox-layout">
         <section className="inbox-list panel" aria-label="Incident list">
           <div className="inbox-list-heading"><div><div className="section-kicker">{scope === 'history' ? 'REPLAY HISTORY' : 'CURRENT REPLAY'}</div><h2>{filter === 'resolved' ? 'Resolved incidents' : filter === 'all' ? 'All incidents' : 'Open incidents'}</h2></div><select aria-label="Filter incident status" value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}><option value="open">Open</option><option value="resolved">Resolved</option><option value="all">All statuses</option></select></div>
+          <div className="comparison-select-help">Choose incidents from separate categories in the same replay.</div>
           {visible.length === 0 && <p className="inbox-empty">{incidents.length ? 'No incidents match this filter.' : 'No incidents yet. Start a seeded replay in Live monitor to watch the system detect and investigate an event.'}</p>}
           <div className="inbox-cards">{visible.map((incident) => {
             const attention = attentionByIncident.get(incident.incident_id)
             const run = runs.find((item) => item.run_id === incident.stream_id)
             const priority = attention?.level
-            return <button key={incident.incident_id} className={`inbox-incident ${selectedId === incident.incident_id ? 'selected' : ''} urgency-${priority ?? 'pending'}`} onClick={() => setSelectedId(incident.incident_id)}>
+            return <div key={incident.incident_id} className="incident-select-row">
+              <label className="incident-compare-check" title="Select for a separate comparison"><input type="checkbox" checked={comparisonSelection.includes(incident.incident_id)}
+                onChange={() => toggleComparisonSelection(incident.incident_id)} disabled={!comparisonSelection.includes(incident.incident_id) && comparisonSelection.length >= 4}/>
+                <span className="sr-only">Select {incident.category} incident for comparison</span></label>
+              <button className={`inbox-incident ${selectedId === incident.incident_id ? 'selected' : ''} urgency-${priority ?? 'pending'}`} onClick={() => setSelectedId(incident.incident_id)}>
               <span className="inbox-incident-top"><strong>{incident.category}</strong><span className={`urgency-pill ${priority ?? 'pending'}`}>{urgencyLabel(priority)}</span></span>
               <span className="inbox-incident-status">{investigationLabel(incident.latest_investigation?.status)}</span>
               <span className="inbox-incident-title">{incident.statistics.tickets} tickets in {incident.statistics.alert_windows} alert windows · {incident.statistics.expected.toFixed(1)} expected</span>
@@ -270,7 +339,8 @@ export default function IncidentInbox({ onOpenMonitor }: { onOpenMonitor: () => 
               <span className="inbox-incident-meta">Episode began · replay time {time(incident.opened_at)}</span>
               <span className="inbox-incident-meta">{incident.status === 'active' ? 'Latest alert window ended' : 'Episode ended'} · replay time {time(incident.latest_window_end)}</span>
               {scope === 'history' && <span className="inbox-incident-meta">Replay seed {run?.seed ?? 'unknown'} · started in app {run ? appTime(run.created_at) : incident.stream_id.slice(0, 8)}</span>}
-            </button>
+              </button>
+            </div>
           })}</div>
         </section>
 

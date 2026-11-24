@@ -183,6 +183,103 @@ def schedule_job(store: EventStore, incident_id: str, reason: str, idempotency_k
                 "request_reused": False}
 
 
+def request_comparison(store: EventStore, incident_ids: list[str], idempotency_key: str) -> dict[str, Any]:
+    """Queue a durable, same-replay comparison without changing incident reports."""
+    if not idempotency_key.strip():
+        raise ValueError("An idempotency key is required")
+    selected = list(dict.fromkeys(str(value) for value in incident_ids))
+    if len(selected) < 2 or len(selected) > 4:
+        raise ValueError("Select between two and four incidents to compare")
+    job_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"incident-comparison:{idempotency_key}"))
+    with store._connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        existing = db.execute("SELECT * FROM incident_comparison_jobs WHERE job_id=?", (job_id,)).fetchone()
+        if existing:
+            if json.loads(existing["selected_incident_ids_json"]) != selected:
+                raise ValueError("This idempotency key was already used for a different comparison")
+            return {**dict(existing), "request_reused": True}
+        placeholders = ",".join("?" for _ in selected)
+        incidents = db.execute(f"SELECT * FROM incidents WHERE incident_id IN ({placeholders})", tuple(selected)).fetchall()
+        if len(incidents) != len(selected):
+            raise KeyError("One or more selected incidents no longer exist")
+        by_id = {row["incident_id"]: row for row in incidents}
+        streams = {row["stream_id"] for row in incidents}
+        categories = {row["category"] for row in incidents}
+        if len(streams) != 1:
+            raise ValueError("All selected incidents must belong to the same replay")
+        if len(categories) < 2:
+            raise ValueError("Select incidents from at least two categories")
+        stream_id = next(iter(streams))
+        latest = db.execute("SELECT COALESCE(MAX(sequence),0),MAX(simulated_at) FROM events WHERE run_id=? "
+                            "AND source NOT IN ('knowledge_docs','runbooks')", (stream_id,)).fetchone()
+        sequence_bound = int(latest[0])
+        cutoff = str(latest[1] or utc_now())
+        alerts = db.execute("SELECT sequence,simulated_at,payload_json FROM events WHERE run_id=? "
+                            "AND source='detector' AND event_type='anomaly_alert' AND sequence<=? ORDER BY sequence",
+                            (stream_id, sequence_bound)).fetchall()
+        alert_payloads = [(int(row["sequence"]), row["simulated_at"], json.loads(row["payload_json"]))
+                          for row in alerts]
+        scope: list[dict[str, Any]] = []
+        for incident_id in selected:
+            incident = by_id[incident_id]
+            episode = json.loads(incident["episode_json"])
+            start = int(episode.get("start_window", 0))
+            end = int(episode.get("latest_window", start))
+            relevant = [item for item in alert_payloads if item[2].get("category") == incident["category"]
+                        and start <= int(item[2].get("window_index", 0)) <= end
+                        and item[2].get("window_end", item[1]) <= cutoff]
+            if not relevant:
+                raise ValueError(f"No eligible alert evidence is available for {incident['category']}")
+            latest_report = db.execute(
+                "SELECT j.cutoff,j.report_json FROM incident_jobs j JOIN incident_report_revisions r ON r.job_id=j.job_id "
+                "WHERE j.incident_id=? AND j.status='completed' AND j.cutoff<=? AND j.sequence_bound<=? "
+                "ORDER BY r.revision DESC LIMIT 1", (incident_id, cutoff, sequence_bound),
+            ).fetchone()
+            finding = None
+            finding_cutoff = None
+            if latest_report and latest_report["report_json"]:
+                finding = str(json.loads(latest_report["report_json"]).get("summary", ""))[:500] or None
+                finding_cutoff = latest_report["cutoff"]
+            scope.append({
+                "incident_id": incident_id, "category": incident["category"],
+                "episode_status": incident["status"], "operational_status": incident["operational_status"],
+                "episode_start_window": min(int(item[2].get("window_index", 0)) for item in relevant),
+                "episode_end_window": max(int(item[2].get("window_index", 0)) for item in relevant),
+                "episode_started_at": min(str(item[2].get("window_start", item[1])) for item in relevant),
+                "latest_window_end": max(str(item[2].get("window_end", item[1])) for item in relevant),
+                "alert_windows": len(relevant),
+                "tickets": sum(int(item[2].get("ticket_count", 0)) for item in relevant),
+                "latest_finding": finding, "finding_cutoff": finding_cutoff,
+            })
+        now = utc_now()
+        order = db.execute("INSERT INTO investigation_queue_order DEFAULT VALUES").lastrowid
+        db.execute("INSERT INTO incident_comparison_jobs "
+                   "(job_id,stream_id,idempotency_key,selected_incident_ids_json,scope_json,cutoff,sequence_bound,status,created_at,queue_order,queued_at) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                   (job_id, stream_id, idempotency_key, json.dumps(selected), json.dumps(scope, sort_keys=True),
+                    cutoff, sequence_bound, "queued", now, order, now))
+        return {**dict(db.execute("SELECT * FROM incident_comparison_jobs WHERE job_id=?", (job_id,)).fetchone()),
+                "request_reused": False}
+
+
+def list_comparison_jobs(store: EventStore, stream_id: str | None = None) -> list[dict[str, Any]]:
+    with store._connection() as db:
+        query = "SELECT * FROM incident_comparison_jobs"
+        params: tuple[Any, ...] = ()
+        if stream_id is not None:
+            query += " WHERE stream_id=?"
+            params = (stream_id,)
+        rows = db.execute(query + " ORDER BY created_at DESC,rowid DESC", params).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["selected_incident_ids"] = json.loads(item.pop("selected_incident_ids_json"))
+            item["scope"] = json.loads(item.pop("scope_json"))
+            item["report"] = json.loads(item.pop("report_json")) if item.get("report_json") else None
+            items.append(item)
+        return items
+
+
 class IncidentWorker:
     def __init__(self, store: EventStore, investigator: Any, evidence: EvidenceTools,
                  clock: Any = None, lease_seconds: int | None = None, cooldown_seconds: int | None = None,
@@ -214,27 +311,36 @@ class IncidentWorker:
             db.execute("BEGIN IMMEDIATE")
             now = self.clock()
             now_text = now.isoformat()
-            expired = db.execute("SELECT * FROM incident_jobs WHERE status='running' AND "
+            expired = db.execute("SELECT 'incident' AS job_kind,j.* FROM incident_jobs j WHERE j.status='running' AND "
                                  "(lease_until IS NULL OR lease_until<=?) ORDER BY queue_order", (now_text,)).fetchall()
+            expired += db.execute("SELECT 'comparison' AS job_kind,j.* FROM incident_comparison_jobs j WHERE j.status='running' AND "
+                                  "(lease_until IS NULL OR lease_until<=?) ORDER BY queue_order", (now_text,)).fetchall()
             for old in expired:
+                table = "incident_jobs" if old["job_kind"] == "incident" else "incident_comparison_jobs"
                 if old["attempt_count"] < self.max_attempts:
                     order = db.execute("INSERT INTO investigation_queue_order DEFAULT VALUES").lastrowid
-                    db.execute("UPDATE incident_jobs SET status='queued',queue_order=?,queued_at=?,lease_until=NULL,"
+                    db.execute(f"UPDATE {table} SET status='queued',queue_order=?,queued_at=?,lease_until=NULL,"
                                "error='Lease expired; provider execution may have completed.' WHERE job_id=?",
                                (order, now_text, old["job_id"]))
                 else:
-                    db.execute("UPDATE incident_jobs SET status='failed',lease_until=NULL,"
+                    db.execute(f"UPDATE {table} SET status='failed',lease_until=NULL,"
                                "error='Investigation lease expired; review required.' WHERE job_id=?", (old["job_id"],))
             self._schedule_pending(db, now)
-            if db.execute("SELECT 1 FROM incident_jobs WHERE status='running' LIMIT 1").fetchone():
+            if db.execute("SELECT 1 FROM incident_jobs WHERE status='running' UNION ALL "
+                           "SELECT 1 FROM incident_comparison_jobs WHERE status='running' LIMIT 1").fetchone():
                 return False
-            row = db.execute("SELECT * FROM incident_jobs WHERE status='queued' ORDER BY queue_order, rowid LIMIT 1").fetchone()
+            row = db.execute("SELECT job_kind,job_id,queue_order,row_order FROM ("
+                             "SELECT 'incident' AS job_kind,job_id,queue_order,rowid AS row_order FROM incident_jobs WHERE status='queued' "
+                             "UNION ALL SELECT 'comparison',job_id,queue_order,rowid FROM incident_comparison_jobs WHERE status='queued') "
+                             "ORDER BY queue_order,row_order LIMIT 1").fetchone()
             if row is None:
                 return False
-            job = dict(row)
+            table = "incident_jobs" if row["job_kind"] == "incident" else "incident_comparison_jobs"
+            job = dict(db.execute(f"SELECT * FROM {table} WHERE job_id=?", (row["job_id"],)).fetchone())
+            job["job_kind"] = row["job_kind"]
             job["fence_token"] += 1
             job["attempt_count"] += 1
-            db.execute("UPDATE incident_jobs SET status='running',attempt_count=?,fence_token=?,lease_until=?,error=NULL WHERE job_id=?",
+            db.execute(f"UPDATE {table} SET status='running',attempt_count=?,fence_token=?,lease_until=?,error=NULL WHERE job_id=?",
                        (job["attempt_count"], job["fence_token"], (now + timedelta(seconds=self.lease_seconds)).isoformat(), job["job_id"]))
         heartbeat_stop = threading.Event()
         heartbeat = threading.Thread(target=self._heartbeat, args=(job, heartbeat_stop), daemon=True)
@@ -244,11 +350,12 @@ class IncidentWorker:
         except Exception as exc:
             with self.store._connection() as db:
                 db.execute("BEGIN IMMEDIATE")
-                current = db.execute("SELECT * FROM incident_jobs WHERE job_id=? AND status='running' AND fence_token=? AND lease_until>?",
+                table = "incident_jobs" if job.get("job_kind") == "incident" else "incident_comparison_jobs"
+                current = db.execute(f"SELECT * FROM {table} WHERE job_id=? AND status='running' AND fence_token=? AND lease_until>?",
                                      (job["job_id"], job["fence_token"], self.clock().isoformat())).fetchone()
                 if current:
                     order = db.execute("INSERT INTO investigation_queue_order DEFAULT VALUES").lastrowid if job["attempt_count"] < self.max_attempts else current["queue_order"]
-                    db.execute("UPDATE incident_jobs SET status=?,error=?,lease_until=NULL,queue_order=?,queued_at=? WHERE job_id=? AND fence_token=?",
+                    db.execute(f"UPDATE {table} SET status=?,error=?,lease_until=NULL,queue_order=?,queued_at=? WHERE job_id=? AND fence_token=?",
                                ("queued" if job["attempt_count"] < self.max_attempts else "failed", str(exc), order, self.clock().isoformat(), job["job_id"], job["fence_token"]))
         finally:
             heartbeat_stop.set()
@@ -259,7 +366,8 @@ class IncidentWorker:
         while not stop.wait(self.lease_seconds / 3):
             with self.store._connection() as db:
                 now = self.clock()
-                updated = db.execute("UPDATE incident_jobs SET lease_until=? WHERE job_id=? AND status='running' "
+                table = "incident_jobs" if job.get("job_kind") == "incident" else "incident_comparison_jobs"
+                updated = db.execute(f"UPDATE {table} SET lease_until=? WHERE job_id=? AND status='running' "
                                      "AND fence_token=? AND lease_until>?",
                                      ((now + timedelta(seconds=self.lease_seconds)).isoformat(), job["job_id"],
                                       job["fence_token"], now.isoformat()))
@@ -299,6 +407,9 @@ class IncidentWorker:
             db.execute("DELETE FROM pending_investigation_followups WHERE incident_id=?", (pending["incident_id"],))
 
     def _execute(self, job: dict) -> None:
+        if job.get("job_kind") == "comparison":
+            self._execute_comparison(job)
+            return
         scoped = ScopedStore(self.store, job["stream_id"], job["cutoff"], job["sequence_bound"])
         tools = EvidenceTools(scoped, retriever=self.evidence.retriever,
                               corpus=ScopedCorpus(self.evidence.corpus, job["cutoff"]), past_only_focus=True)
@@ -338,6 +449,57 @@ class IncidentWorker:
         payload["evidence_cutoff"] = job["cutoff"]
         payload["evidence_sequence"] = job["sequence_bound"]
         self._commit_report(job, payload)
+
+    def _execute_comparison(self, job: dict[str, Any]) -> None:
+        scoped = ScopedStore(self.store, job["stream_id"], job["cutoff"], job["sequence_bound"])
+        tools = EvidenceTools(scoped, retriever=self.evidence.retriever,
+                              corpus=ScopedCorpus(self.evidence.corpus, job["cutoff"]), past_only_focus=True)
+        scope = json.loads(job["scope_json"])
+        alerts = scoped.search_events(job["stream_id"], ("detector",), limit=2000,
+                                      event_types=("anomaly_alert",))
+        signals: list[dict[str, Any]] = []
+        summaries: list[dict[str, Any]] = []
+        for selected in scope:
+            category = selected["category"]
+            start, end = int(selected["episode_start_window"]), int(selected["episode_end_window"])
+            summary = tools.build_episode_summary(job["stream_id"], category, start, end, end)
+            summary["analysis_end_at"] = job["cutoff"]
+            eligible = [item for item in alerts if item["payload"].get("category") == category
+                        and start <= int(item["payload"].get("window_index", -1)) <= end]
+            if not eligible:
+                raise ValueError(f"No cutoff-eligible alert evidence for selected {category} incident")
+            alert = eligible[-1]
+            signals.append({"incident_id": selected["incident_id"], "evidence_id": alert["evidence_id"],
+                            "simulated_at": alert["simulated_at"], **alert["payload"],
+                            "episode_start_window_index": start, "episode_end_window_index": end,
+                            "focus_window_index": end, "episode_summary": summary})
+            summaries.append(summary)
+        primary = scope[0]
+        primary_context = dict(primary)
+        cross_context = [dict(item) for item in scope[1:]]
+        context = {"selected_signals": signals, "categories": list(dict.fromkeys(item["category"] for item in scope)),
+                   "episode_summaries": summaries, "primary_incident_context": primary_context,
+                   "cross_category_context": cross_context, "comparison_requested": True}
+        investigator = self.investigator()
+        question = ("Compare the selected category incidents using evidence available by this fixed cutoff. "
+                    "Keep findings scoped to their separate incidents. Assess a shared explanation only when "
+                    "independent underlying evidence supports it; otherwise explain what remains uncertain.")
+        report = investigator.investigate(job["stream_id"], question, tools, context)
+        report.episode_summaries = summaries
+        report.search_activity = summarize_search_trace(report.tool_trace)
+        payload = report.to_dict()
+        payload["investigator_mode"] = getattr(investigator, "mode", "custom")
+        payload["evidence_cutoff"] = job["cutoff"]
+        payload["evidence_sequence"] = job["sequence_bound"]
+        payload["comparison_scope"] = scope
+        with self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            result = db.execute("UPDATE incident_comparison_jobs SET status='completed',report_json=?,completed_at=?,"
+                                "lease_until=NULL,error=NULL WHERE job_id=? AND status='running' AND fence_token=? AND lease_until>?",
+                                (json.dumps(payload), self.clock().isoformat(), job["job_id"], job["fence_token"],
+                                 self.clock().isoformat()))
+            if result.rowcount != 1:
+                return
 
     def _commit_report(self, job: dict, payload: dict) -> bool:
         with self.store._connection() as db:

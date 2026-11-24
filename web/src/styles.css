@@ -100,12 +100,29 @@
 .inbox-stat>span{font:10px var(--font-mono);letter-spacing:.09em;color:var(--muted)}
 .inbox-stat>strong{font-size:25px;line-height:1.1;color:var(--text-strong)}
 .inbox-stat>small{font-size:11px;color:var(--muted)}
+.comparison-panel{padding:16px 19px;margin-bottom:15px}
+.comparison-panel-heading,.comparison-selection{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.comparison-panel-heading h2{font-size:17px;margin:5px 0;color:var(--text-strong)}
+.comparison-panel-heading>span,.comparison-select-help{font-size:10px;color:var(--muted)}
+.comparison-panel>.workspace-note{margin:4px 0 10px}
+.comparison-selection{padding:10px 0;border-top:1px solid var(--border-soft);color:var(--text-secondary);font-size:12px}
+.comparison-notice{padding:9px 11px;border-left:2px solid var(--mint);background:var(--selected-bg);color:var(--text-secondary);font-size:11px}
+.comparison-results{display:grid;gap:9px;margin-top:10px}
+.comparison-result{border:1px solid var(--border);border-radius:6px;padding:12px 14px;background:var(--surface-2)}
+.comparison-result>p,.comparison-result li{font-size:12px;line-height:1.5;color:var(--text-secondary)}
+.comparison-result ul{margin:8px 0;padding-left:20px}
+.comparison-result details{font-size:11px;color:var(--blue-soft)}
+.comparison-select-help{padding:8px 15px;border-bottom:1px solid var(--border-soft)}
 .inbox-layout{display:grid;grid-template-columns:minmax(285px,370px) minmax(0,1fr);align-items:start;gap:14px}
 .inbox-list{position:sticky;top:86px;overflow:hidden}
 .inbox-list-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:17px 17px 13px;border-bottom:1px solid var(--border-soft)}
 .inbox-list-heading h2{font-size:17px;margin:5px 0 0;color:var(--text-strong)}
 .inbox-list-heading select{border:1px solid var(--border-strong);border-radius:5px;background:var(--field-bg);color:var(--text);padding:7px 8px;font-size:12px}
 .inbox-cards{display:grid;gap:0;max-height:calc(100vh - 250px);overflow:auto}
+.incident-select-row{display:grid;grid-template-columns:34px minmax(0,1fr);align-items:stretch;border-bottom:1px solid var(--border-soft)}
+.incident-compare-check{display:flex;justify-content:center;align-items:start;padding-top:18px;cursor:pointer;background:var(--surface-1)}
+.incident-compare-check input{accent-color:var(--mint);width:15px;height:15px;margin:0}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .inbox-incident{display:grid;gap:8px;text-align:left;padding:14px 16px;border:0;border-bottom:1px solid var(--border-soft);border-left:3px solid var(--status-off);background:transparent;color:var(--text);width:100%}
 .inbox-incident:hover,.inbox-incident.selected{background:var(--selected-bg)}
 .inbox-incident.urgency-immediate{border-left-color:var(--danger)}

@@ -15,7 +15,7 @@ from starlette.responses import StreamingResponse
 
 from agentic_ops.domain import SimulationConfig
 from agentic_ops.detector_host import list_incidents
-from agentic_ops.incident_worker import schedule_job
+from agentic_ops.incident_worker import list_comparison_jobs, request_comparison, schedule_job
 from agentic_ops.service import OperationsRuntime
 from agentic_ops.simulation import LIVE_REPLAY_PROFILES, choose_live_replay_profile
 
@@ -61,6 +61,11 @@ class IncidentInvestigationRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=200)
 
 
+class IncidentComparisonRequest(BaseModel):
+    incident_ids: list[str] = Field(min_length=2, max_length=4)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+
+
 class IncidentActionRequest(BaseModel):
     action_description: str = Field(min_length=1, max_length=2000)
     occurred_at: datetime
@@ -103,6 +108,19 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
     def incidents(stream_id: str | None = None) -> list[dict]:
         return list_incidents(app.state.runtime.store, stream_id)
 
+    @app.get("/api/comparisons")
+    def comparisons(stream_id: str | None = None) -> list[dict]:
+        return list_comparison_jobs(app.state.runtime.store, stream_id)
+
+    @app.post("/api/comparisons", status_code=202)
+    def compare_incidents(request: IncidentComparisonRequest) -> dict:
+        try:
+            return request_comparison(app.state.runtime.store, request.incident_ids, request.idempotency_key)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.get("/api/notifications")
     def notifications(stream_id: str | None = None) -> dict:
         coordinator = app.state.runtime.notifications
@@ -122,8 +140,10 @@ def create_app(runtime: OperationsRuntime | None = None) -> FastAPI:
     @app.get("/api/investigation-queue")
     def investigation_queue() -> dict:
         with app.state.runtime.store._connection() as db:
-            rows = db.execute("SELECT COALESCE(queued_at,created_at) AS queued_at FROM incident_jobs WHERE status='queued' ORDER BY queue_order,rowid").fetchall()
-            running = db.execute("SELECT COUNT(*) FROM incident_jobs WHERE status='running'").fetchone()[0]
+            rows = db.execute("SELECT COALESCE(queued_at,created_at) AS queued_at FROM incident_jobs WHERE status='queued' "
+                              "UNION ALL SELECT COALESCE(queued_at,created_at) FROM incident_comparison_jobs WHERE status='queued'").fetchall()
+            running = (db.execute("SELECT COUNT(*) FROM incident_jobs WHERE status='running'").fetchone()[0]
+                       + db.execute("SELECT COUNT(*) FROM incident_comparison_jobs WHERE status='running'").fetchone()[0])
             pending = db.execute("SELECT COUNT(*) FROM pending_investigation_followups").fetchone()[0]
         oldest = min((datetime.fromisoformat(row["queued_at"].replace("Z", "+00:00")) for row in rows), default=None)
         return {"queued": len(rows), "running": running, "pending_followups": pending,

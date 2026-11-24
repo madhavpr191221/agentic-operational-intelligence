@@ -52,6 +52,42 @@ class ApiTests(unittest.TestCase):
             finally:
                 runtime.stop()
 
+    def test_comparison_endpoint_queues_a_frozen_same_replay_scope(self):
+        from fastapi.testclient import TestClient
+        from agentic_ops.api import create_app
+        from agentic_ops.detection import CategoryDetectorSuite
+        from agentic_ops.detector_host import DetectorHost
+
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = OperationsRuntime(EventStore(Path(directory) / "comparison-api.sqlite3"), MockInvestigator())
+            try:
+                run_id = runtime.store.create_run("mixed_categories", 2701, "poisson", {})
+                DetectorHost(runtime.store, run_id, CategoryDetectorSuite("poisson", 4, ["payments", "orders"]))
+                for category in ("payments", "orders"):
+                    incident_id = f"{category}-incident"
+                    with runtime.store._connection() as db:
+                        db.execute("INSERT INTO incidents (incident_id,stream_id,category,status,opened_at,latest_window_end,last_event_id,episode_json) "
+                                   "VALUES (?,?,?,?,?,?,?,?)",
+                                   (incident_id, run_id, category, "active", "2026-01-01T00:30:00Z",
+                                    "2026-01-01T00:30:00Z", "event", '{"category":"' + category + '","start_window":0,"latest_window":0}'))
+                    runtime.store.add_event(run_id, "2026-01-01T00:30:00Z", "detector", "anomaly_alert",
+                                            {"category": category, "window_index": 0,
+                                             "window_start": "2026-01-01T00:00:00Z",
+                                             "window_end": "2026-01-01T00:30:00Z", "ticket_count": 12})
+                client = TestClient(create_app(runtime))
+                response = client.post("/api/comparisons", json={
+                    "incident_ids": ["payments-incident", "orders-incident"], "idempotency_key": "api-compare-1"})
+                self.assertEqual(response.status_code, 202)
+                self.assertEqual(response.json()["status"], "queued")
+                listed = client.get(f"/api/comparisons?stream_id={run_id}").json()
+                self.assertEqual(len(listed), 1)
+                self.assertEqual({item["category"] for item in listed[0]["scope"]}, {"payments", "orders"})
+                invalid = client.post("/api/comparisons", json={
+                    "incident_ids": ["payments-incident", "missing"], "idempotency_key": "api-compare-2"})
+                self.assertEqual(invalid.status_code, 404)
+            finally:
+                runtime.stop()
+
     def test_notification_inbox_and_acknowledgement_endpoints(self):
         from fastapi.testclient import TestClient
         from agentic_ops.api import create_app
