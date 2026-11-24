@@ -274,6 +274,56 @@ class IncidentWorkerTests(unittest.TestCase):
             self.assertEqual(found["count"], 1)
             self.assertNotEqual(found["records"][0]["evidence_id"], late["evidence_id"])
 
+    def test_relationship_group_requires_per_incident_evidence_and_keeps_versions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = EventStore(Path(directory) / "relationships.db")
+            self._queue_fixture(store)
+            context = [{"incident_id": "orders-1", "category": "orders"}]
+            with store._connection() as db:
+                db.execute("INSERT INTO incidents (incident_id,stream_id,category,status,opened_at,latest_window_end,last_event_id,episode_json) "
+                           "VALUES (?,?,?,?,?,?,?,?)",
+                           ("orders-1", "stream", "orders", "active", "001", "002", "orders-event",
+                            json.dumps({"category": "orders", "start_window": 1, "latest_window": 1})))
+                db.execute("UPDATE incident_jobs SET status='running',fence_token=1,lease_until=? "
+                           "WHERE job_id='first'", ("2026-01-01T00:01:00+00:00",))
+                db.execute("UPDATE incident_jobs SET cross_category_context_json=? WHERE job_id='first'",
+                           (json.dumps(context),))
+            report = {"summary": "Possible shared checkout dependency.", "evidence": [
+                {"evidence_id": "e-pay", "source": "product_logs", "observed_at": "001", "summary": "shared"},
+                {"evidence_id": "e-orders", "source": "product_logs", "observed_at": "001", "summary": "shared"},
+            ], "tool_trace": [
+                {"tool": "search_cross_category_evidence", "arguments": {"incident_id": "incident"},
+                 "result": {"records": [{"evidence_id": "e-pay", "payload": {"service": "checkout-orchestrator"}}]}},
+                {"tool": "search_cross_category_evidence", "arguments": {"incident_id": "orders-1"},
+                 "result": {"records": [{"evidence_id": "e-orders", "payload": {"service": "checkout-orchestrator"}}]}},
+            ], "relationship_assessments": [{
+                "title": "Checkout orchestration may connect both incidents",
+                "shared_system": "checkout-orchestrator", "explanation": "Both incident intervals show errors in this service.",
+                "status": "possible", "incident_ids": ["incident", "orders-1"],
+                "supporting_evidence_by_incident": {"incident": ["e-pay"], "orders-1": ["e-orders"]},
+            }]}
+            worker = IncidentWorker(store, None, None, clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc))
+            self.assertTrue(worker._commit_report({"job_id": "first", "fence_token": 1}, report))
+            with store._connection() as db:
+                group = db.execute("SELECT * FROM incident_relationship_groups").fetchone()
+                self.assertEqual((group["status"], group["current_version"]), ("possible", 1))
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM incident_relationship_members").fetchone()[0], 2)
+            self.assertEqual(len(IncidentWorkspace(store).detail("incident")["relationships"]), 1)
+            self.assertEqual(len(IncidentWorkspace(store).detail("orders-1")["relationships"]), 1)
+
+            with store._connection() as db:
+                db.execute("UPDATE incident_jobs SET status='running',fence_token=1,lease_until=? "
+                           "WHERE job_id='second'", ("2026-01-01T00:01:00+00:00",))
+                db.execute("UPDATE incident_jobs SET cross_category_context_json=? WHERE job_id='second'",
+                           (json.dumps(context),))
+            revised = json.loads(json.dumps(report).replace("e-pay", "e-pay-2").replace("e-orders", "e-orders-2"))
+            revised["relationship_assessments"][0]["status"] = "weakened"
+            self.assertTrue(worker._commit_report({"job_id": "second", "fence_token": 1}, revised))
+            detail = IncidentWorkspace(store).detail("incident")
+            self.assertEqual(detail["relationships"][0]["status"], "weakened")
+            self.assertEqual(detail["relationships"][0]["current_version"], 2)
+            self.assertEqual(len(detail["relationships"][0]["history"]), 2)
+
     def test_automatic_initial_job_and_idempotent_manual_request(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime = OperationsRuntime(EventStore(Path(directory) / "runtime.db"), SnapshotInvestigator())
