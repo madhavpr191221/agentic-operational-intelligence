@@ -306,6 +306,7 @@ export default function IncidentInbox({ onOpenMonitor }: { onOpenMonitor: () => 
                 return <article className="investigation-revision" key={job.job_id}>
                   <div className="revision-heading"><strong>{job.revision ? `Revision ${job.revision}` : job.reason}</strong><span>{job.status}</span></div>
                   <small>Evidence cutoff · replay time {time(job.cutoff)} · {job.completed_at ? `completed · app time ${appTime(job.completed_at)}` : `queued · app time ${appTime(job.created_at)}`}</small>
+                  {job.revision && job.revision > 1 && <p className="workspace-note revision-reason">Why this report was refreshed: {job.reason}</p>}
                   {!!job.cross_category_context?.length && <details className="cross-category-context">
                     <summary>Other open incidents available at this cutoff ({job.cross_category_context.length})</summary>
                     <p className="workspace-note">This compact index helps the investigator find relevant context. It is not evidence of a shared cause.</p>

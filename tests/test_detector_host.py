@@ -178,7 +178,7 @@ class DetectorHostTests(unittest.TestCase):
             with store._connection() as db:
                 self.assertEqual(db.execute("SELECT count(*) FROM incident_jobs").fetchone()[0], 0)
 
-    def test_material_service_change_after_episode_ends_is_retained(self):
+    def test_episode_end_does_not_schedule_final_investigation(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = EventStore(Path(tmp) / "events.sqlite")
             run_id = store.create_run("payment_issue", 1, "poisson", {})
@@ -193,8 +193,36 @@ class DetectorHostTests(unittest.TestCase):
             store.add_event(run_id, "006", "product_logs", "service_log_summary", {"service": "checkout-payments", "requests": 100, "errors": 20})
             host.observe_completed_window(observation(6, 4), automatic=True)
             with store._connection() as db:
-                pending = db.execute("SELECT * FROM pending_investigation_followups WHERE incident_id='incident'").fetchone()
-                self.assertEqual(pending["cutoff"], "007")
+                self.assertIsNone(db.execute("SELECT * FROM pending_investigation_followups WHERE incident_id='incident'").fetchone())
+
+    def test_new_shared_service_evidence_coalesces_for_linked_active_incidents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EventStore(Path(tmp) / "events.sqlite")
+            run_id = store.create_run("mixed_categories", 2701, "poisson", {})
+            host = DetectorHost(store, run_id, CategoryDetectorSuite("poisson", 4, ["payments", "orders"]))
+            with store._connection() as db:
+                for incident_id, category in (("pay-incident", "payments"), ("order-incident", "orders")):
+                    episode = {"category": category, "start_window": 4, "latest_window": 4}
+                    db.execute("INSERT INTO incidents (incident_id,stream_id,category,status,opened_at,latest_window_end,last_event_id,episode_json) "
+                               "VALUES (?,?,?,?,?,?,?,?)",
+                               (incident_id, run_id, category, "active", "004", "005", "event", json.dumps(episode)))
+                db.execute("INSERT INTO incident_relationship_groups "
+                           "(group_id,stream_id,shared_system,status,current_version,created_at,updated_at) "
+                           "VALUES (?,?,?,?,?,?,?)",
+                           ("shared", run_id, "checkout-orchestrator", "possible", 1, "now", "now"))
+                db.executemany("INSERT INTO incident_relationship_members (group_id,incident_id) VALUES (?,?)",
+                               [("shared", "pay-incident"), ("shared", "order-incident")])
+            store.add_event(run_id, "005", "product_logs", "service_log_summary",
+                            {"service": "checkout-orchestrator", "requests": 100, "errors": 1})
+            store.add_event(run_id, "006", "product_logs", "service_log_summary",
+                            {"service": "checkout-orchestrator", "requests": 100, "errors": 20})
+
+            host.observe_completed_window(observation(6, 4), automatic=True)
+
+            with store._connection() as db:
+                rows = db.execute("SELECT incident_id,cutoff FROM pending_investigation_followups ORDER BY incident_id").fetchall()
+                self.assertEqual([(row["incident_id"], row["cutoff"]) for row in rows],
+                                 [("order-incident", "007"), ("pay-incident", "007")])
 
 
 if __name__ == "__main__":
