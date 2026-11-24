@@ -11,6 +11,7 @@ from agentic_ops.incident_worker import IncidentWorker, ScopedStore, schedule_jo
 from agentic_ops.detection import CategoryDetectorSuite, CountObservation
 from agentic_ops.detector_host import DetectorHost
 from agentic_ops.evidence import EvidenceTools
+from agentic_ops.incident_workspace import IncidentWorkspace
 from agentic_ops.service import OperationsRuntime
 from agentic_ops.store import EventStore
 
@@ -211,6 +212,67 @@ class IncidentWorkerTests(unittest.TestCase):
             self.assertNotIn(unavailable["evidence_id"], [item["evidence_id"] for item in wider.search_events(run_id, ("support_tickets",))])
             self.assertEqual([item["evidence_id"] for item in scoped.get_events_by_evidence_ids(
                 run_id, [before["evidence_id"], future["evidence_id"], late["evidence_id"]])], [before["evidence_id"]])
+
+    def test_job_freezes_only_other_open_category_context_available_at_cutoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = EventStore(Path(directory) / "cross-context.db")
+            run_id = store.create_run("mixed_categories", 27, "poisson", {})
+            DetectorHost(store, run_id, CategoryDetectorSuite("poisson", 4,
+                                                               ["payments", "orders", "account"]))
+            with store._connection() as db:
+                for incident_id, category, status, start, end in (
+                    ("payment-1", "payments", "active", 2, 2),
+                    ("orders-1", "orders", "ended", 0, 1),
+                    ("account-resolved", "account", "ended", 0, 0),
+                ):
+                    db.execute("INSERT INTO incidents (incident_id,stream_id,category,status,opened_at,latest_window_end,last_event_id,episode_json) "
+                               "VALUES (?,?,?,?,?,?,?,?)",
+                               (incident_id, run_id, category, status, "2026-01-01T00:00:00Z",
+                                "2026-01-01T01:00:00Z", incident_id,
+                                json.dumps({"category": category, "start_window": start,
+                                            "latest_window": end, "window_count": end-start+1})))
+                db.execute("UPDATE incidents SET operational_status='resolved' WHERE incident_id='account-resolved'")
+                db.execute("INSERT INTO episode_outbox (event_id,stream_id,episode_id,event_type,window_index,payload_json,created_at) "
+                           "VALUES (?,?,?,?,?,?,?)",
+                           ("open-payment", run_id, "payment-1", "episode_opened", 2,
+                            json.dumps({"episode": {"category": "payments", "start_window": 2,
+                                                     "latest_window": 2, "window_count": 1}}), "now"))
+            for index, category, end, tickets in (
+                (0, "orders", "2026-01-01T00:30:00Z", 5),
+                (1, "orders", "2026-01-01T01:00:00Z", 6),
+                (0, "account", "2026-01-01T00:30:00Z", 40),
+                (2, "payments", "2026-01-01T01:30:00Z", 12),
+            ):
+                store.add_event(run_id, end, "detector", "anomaly_alert",
+                                {"category": category, "window_index": index,
+                                 "window_start": f"2026-01-01T{index:02d}:00:00Z",
+                                 "window_end": end, "ticket_count": tickets, "expected": 4})
+            job = schedule_job(store, "payment-1", "Operator requested investigation", "cross-context")
+            snapshot = json.loads(job["cross_category_context_json"])
+            self.assertEqual(len(snapshot), 1)
+            self.assertEqual(snapshot[0]["incident_id"], "orders-1")
+            self.assertEqual((snapshot[0]["alert_windows"], snapshot[0]["tickets"]), (2, 11))
+            self.assertEqual(snapshot[0]["latest_window_end"], "2026-01-01T01:00:00Z")
+            self.assertNotIn("payments", [item["category"] for item in snapshot])
+            detail = IncidentWorkspace(store, "Local operator").detail("payment-1")
+            self.assertEqual(detail["investigations"][0]["cross_category_context"], snapshot)
+
+    def test_cross_category_evidence_search_respects_frozen_cutoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = EventStore(Path(directory) / "cross-evidence.db")
+            run_id = store.create_run("mixed_categories", 27, "poisson", {})
+            store.add_event(run_id, "2026-01-01T00:15:00Z", "product_logs", "service_log_summary",
+                            {"service": "identity-service", "message": "verification latency elevated"})
+            late = store.add_event(run_id, "2026-01-01T00:25:00Z", "product_logs", "service_log_summary",
+                                   {"service": "identity-service", "message": "verification latency elevated",
+                                    "available_at": "2026-01-01T01:30:00Z"})
+            scoped = ScopedStore(store, run_id, "2026-01-01T01:00:00Z", late["sequence"])
+            evidence = EvidenceTools(scoped)
+            found = evidence.search_cross_category_records(
+                run_id, "identity-service verification", "account",
+                "2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z")
+            self.assertEqual(found["count"], 1)
+            self.assertNotEqual(found["records"][0]["evidence_id"], late["evidence_id"])
 
     def test_automatic_initial_job_and_idempotent_manual_request(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -68,6 +68,7 @@ class DetectorHost:
                     stream_id TEXT NOT NULL, reason TEXT NOT NULL,
                     cutoff TEXT NOT NULL, sequence_bound INTEGER NOT NULL,
                     episode_json TEXT NOT NULL, status TEXT NOT NULL,
+                    cross_category_context_json TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL, report_json TEXT, error TEXT,
                     FOREIGN KEY (incident_id) REFERENCES incidents(incident_id)
                 );
@@ -85,6 +86,7 @@ class DetectorHost:
                 ("lease_until", "TEXT"), ("fence_token", "INTEGER NOT NULL DEFAULT 0"),
                 ("queue_order", "INTEGER"), ("queued_at", "TEXT"), ("completed_at", "TEXT"),
                 ("automatic_followup", "INTEGER NOT NULL DEFAULT 0"),
+                ("cross_category_context_json", "TEXT NOT NULL DEFAULT '[]'"),
             ):
                 if name not in job_columns:
                     db.execute(f"ALTER TABLE incident_jobs ADD COLUMN {name} {declaration}")

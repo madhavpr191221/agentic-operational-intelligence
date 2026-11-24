@@ -173,11 +173,13 @@ class IncidentWorkspace:
             result["investigations"] = []
             for job in db.execute(
                     "SELECT j.job_id,j.reason,j.cutoff,j.status,j.created_at,j.completed_at,j.error,"
+                    "j.cross_category_context_json,"
                     "j.report_json,r.revision FROM incident_jobs j LEFT JOIN incident_report_revisions r "
                     "ON r.job_id=j.job_id WHERE j.incident_id=? ORDER BY COALESCE(r.revision,999999),j.created_at,j.rowid",
                     (incident_id,)).fetchall():
                 item = dict(job)
                 item["report"] = json.loads(item.pop("report_json")) if item["report_json"] else None
+                item["cross_category_context"] = json.loads(item.pop("cross_category_context_json") or "[]")
                 result["investigations"].append(item)
             result["actions"] = [self._decode(row) for row in db.execute(
                 "SELECT * FROM incident_timeline WHERE incident_id=? AND event_type='operator_action_recorded' "
