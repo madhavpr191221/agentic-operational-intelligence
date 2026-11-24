@@ -67,7 +67,13 @@ class RelationshipNote(BaseModel):
     explanation: str
     status: Literal["possible", "reaffirmed", "weakened", "withdrawn"]
     incident_ids: list[str] = Field(min_length=2, max_length=4)
-    supporting_evidence_by_incident: dict[str, list[str]]
+    supporting_evidence_by_incident: list["IncidentEvidenceNote"]
+
+
+class IncidentEvidenceNote(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    incident_id: str
+    evidence_handles: list[str]
 
 
 class InvestigationNotes(BaseModel):
@@ -540,7 +546,7 @@ class OpenAIInvestigator(Investigator):
                 "cross_category_context is a compact navigation index of other unresolved incidents known at this job's cutoff, not evidence of a shared cause. "
                 "Only when a concrete clue from the selected incident may also explain a listed incident, use search_cross_category_evidence for targeted underlying records. "
                 "To propose a relationship, retrieve a specific shared service, dependency, or change within the evidence interval of the selected incident and every related incident. "
-                "Put a possible_relationship only when the returned underlying records for every incident independently mention the same specific shared_system; cite those record handles under the matching incident IDs. "
+                "Put a possible_relationship only when the returned underlying records for every incident independently mention the same specific shared_system; provide supporting_evidence_by_incident as a list of objects, each with incident_id and evidence_handles. "
                 "Do not infer a relationship from timing, ticket counts, or the context summary itself; preserve uncertainty. "
                 "The signals already contain the detector outputs; do not recompute statistics. Interpret Z-score, "
                 "CUSUM, and log-likelihood ratio as distinct detector evidence, not values to add together. "
@@ -765,9 +771,11 @@ class OpenAIInvestigator(Investigator):
             if not shared_system or len(shared_system) > 160:
                 continue
             support_by_incident: dict[str, list[str]] = {}
+            candidate_support = {item.incident_id: item.evidence_handles
+                                 for item in candidate.supporting_evidence_by_incident}
             supported = True
             for incident_id in incident_ids:
-                handles = candidate.supporting_evidence_by_incident.get(incident_id, [])
+                handles = candidate_support.get(incident_id, [])
                 resolved = list(dict.fromkeys(value for handle in handles
                                                if (value := _resolve_citation(handle, valid_ids, aliases))))
                 retrieved = cross_evidence.get(incident_id, set())
