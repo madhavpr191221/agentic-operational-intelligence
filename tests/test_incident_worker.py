@@ -7,7 +7,7 @@ from pathlib import Path
 
 from agentic_ops.agent import Investigator
 from agentic_ops.domain import RCAReport, SimulationConfig
-from agentic_ops.incident_worker import IncidentWorker, ScopedStore, schedule_job
+from agentic_ops.incident_worker import IncidentWorker, ScopedStore, request_comparison, schedule_job, list_comparison_jobs
 from agentic_ops.detection import CategoryDetectorSuite, CountObservation
 from agentic_ops.detector_host import DetectorHost
 from agentic_ops.evidence import EvidenceTools
@@ -323,6 +323,90 @@ class IncidentWorkerTests(unittest.TestCase):
             self.assertEqual(detail["relationships"][0]["status"], "weakened")
             self.assertEqual(detail["relationships"][0]["current_version"], 2)
             self.assertEqual(len(detail["relationships"][0]["history"]), 2)
+
+    def test_requested_comparison_freezes_scope_runs_durably_and_stays_separate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = EventStore(Path(directory) / "comparison.db")
+            run_id = store.create_run("mixed_categories", 2701, "poisson", {})
+            DetectorHost(store, run_id, CategoryDetectorSuite("poisson", 4, ["payments", "orders"]))
+            interval = ("2026-01-01T00:00:00Z", "2026-01-01T00:30:00Z")
+            store.add_event(run_id, interval[1], "detector", "window_observation",
+                            {"window_index": 0, "window_start": interval[0], "window_end": interval[1],
+                             "category_counts": {"payments": 18, "orders": 21}})
+            store.add_event(run_id, interval[1], "detector", "window_score",
+                            {"window_index": 0, "scores_by_category": {
+                                "payments": {"expected": 4.0}, "orders": {"expected": 4.0}}})
+            for category, count in (("payments", 18), ("orders", 21)):
+                episode = {"category": category, "start_window": 0, "latest_window": 0}
+                incident_id = f"{category}-incident"
+                with store._connection() as db:
+                    db.execute("INSERT INTO incidents (incident_id,stream_id,category,status,opened_at,latest_window_end,last_event_id,episode_json) "
+                               "VALUES (?,?,?,?,?,?,?,?)",
+                               (incident_id, run_id, category, "active", interval[1], interval[1], "event", json.dumps(episode)))
+                store.add_event(run_id, interval[1], "detector", "anomaly_alert",
+                                {"category": category, "window_index": 0, "window_start": interval[0],
+                                 "window_end": interval[1], "ticket_count": count, "expected": 4.0,
+                                 "scores": [{"score": 5.0, "threshold": 2.0, "anomalous": True}]})
+                store.add_event(run_id, "2026-01-01T00:12:00Z", "support_tickets", "ticket_created",
+                                {"category": category, "body": f"Synthetic {category} issue"})
+
+            job = request_comparison(store, ["payments-incident", "orders-incident"], "compare-1")
+            replay_later = store.add_event(run_id, "2026-01-01T01:00:00Z", "product_logs", "service_log_summary",
+                                           {"service": "checkout-orchestrator", "message": "later"})
+            reused = request_comparison(store, ["payments-incident", "orders-incident"], "compare-1")
+            self.assertTrue(reused["request_reused"])
+            self.assertEqual(reused["cutoff"], interval[1])
+            self.assertLess(reused["sequence_bound"], replay_later["sequence"])
+
+            class RecordingInvestigator:
+                mode = "test"
+                context = None
+
+                def investigate(self, selected_run, question, evidence_tools, alert_context=None, on_progress=None):
+                    self.context = alert_context
+                    self.assert_cutoff = alert_context["primary_incident_context"]
+                    assert [item["category"] for item in alert_context["selected_signals"]] == ["payments", "orders"]
+                    records = evidence_tools.store.search_events(selected_run, ("support_tickets",), limit=100)
+                    assert all(item["simulated_at"] <= interval[1] for item in records)
+                    return RCAReport("completed", "Separate category findings compared.", [], [])
+
+            investigator = RecordingInvestigator()
+            worker = IncidentWorker(store, lambda: investigator, EvidenceTools(store))
+            self.assertTrue(worker.run_one())
+            completed = list_comparison_jobs(store, run_id)[0]
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(completed["report"]["summary"], "Separate category findings compared.")
+            self.assertEqual(len(completed["report"]["comparison_scope"]), 2)
+            self.assertEqual(len(investigator.context["selected_signals"]), 2)
+            with store._connection() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM incident_report_revisions").fetchone()[0], 0)
+
+    def test_incident_and_comparison_jobs_share_fifo_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = EventStore(Path(directory) / "shared-queue.db")
+            self._queue_fixture(store)
+            with store._connection() as db:
+                order = db.execute("INSERT INTO investigation_queue_order DEFAULT VALUES").lastrowid
+                db.execute("INSERT INTO incident_comparison_jobs "
+                           "(job_id,stream_id,idempotency_key,selected_incident_ids_json,scope_json,cutoff,sequence_bound,status,created_at,queue_order,queued_at) "
+                           "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                           ("comparison", "stream", "key", '["a","b"]', '[]', "002", 0,
+                            "queued", "2026-01-01T00:00:00+00:00", order, "2026-01-01T00:00:00+00:00"))
+            worker = IncidentWorker(store, None, None, clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc))
+            seen = []
+
+            def complete(job):
+                seen.append((job["job_kind"], job["job_id"]))
+                table = "incident_jobs" if job["job_kind"] == "incident" else "incident_comparison_jobs"
+                with store._connection() as db:
+                    db.execute(f"UPDATE {table} SET status='completed',completed_at=? WHERE job_id=?",
+                               ("2026-01-01T00:00:01+00:00", job["job_id"]))
+
+            worker._execute = complete
+            self.assertTrue(worker.run_one())
+            self.assertTrue(worker.run_one())
+            self.assertTrue(worker.run_one())
+            self.assertEqual(seen, [("incident", "first"), ("incident", "second"), ("comparison", "comparison")])
 
     def test_automatic_initial_job_and_idempotent_manual_request(self):
         with tempfile.TemporaryDirectory() as directory:

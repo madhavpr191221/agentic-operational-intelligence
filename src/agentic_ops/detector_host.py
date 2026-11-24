@@ -120,6 +120,13 @@ class DetectorHost:
                        "status TEXT NOT NULL, title TEXT NOT NULL, explanation TEXT NOT NULL, "
                        "supporting_evidence_json TEXT NOT NULL, "
                        "PRIMARY KEY (group_id,version))")
+            db.execute("CREATE TABLE IF NOT EXISTS incident_comparison_jobs ("
+                       "job_id TEXT PRIMARY KEY, stream_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, "
+                       "selected_incident_ids_json TEXT NOT NULL, scope_json TEXT NOT NULL, cutoff TEXT NOT NULL, "
+                       "sequence_bound INTEGER NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, "
+                       "completed_at TEXT, report_json TEXT, error TEXT, queue_order INTEGER NOT NULL, "
+                       "queued_at TEXT NOT NULL, lease_until TEXT, fence_token INTEGER NOT NULL DEFAULT 0, "
+                       "attempt_count INTEGER NOT NULL DEFAULT 0, UNIQUE(stream_id,idempotency_key))")
             old_reports = db.execute("SELECT job_id,incident_id FROM incident_jobs WHERE status='completed' "
                                      "AND report_json IS NOT NULL AND job_id NOT IN "
                                      "(SELECT job_id FROM incident_report_revisions) ORDER BY created_at,rowid").fetchall()
