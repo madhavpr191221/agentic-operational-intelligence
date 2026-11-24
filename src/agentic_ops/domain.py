@@ -8,6 +8,7 @@ from typing import Any, Literal
 ScenarioName = Literal[
     "payment_issue", "healthy", "unrelated_issue", "resolved_issue",
     "orders_queue_backlog", "account_identity_outage", "delivery_carrier_degradation",
+    "mixed_categories",
 ]
 ArrivalModel = Literal["poisson", "negative_binomial"]
 CATEGORIES = ("payments", "orders", "account", "delivery")

@@ -56,6 +56,9 @@ LIVE_REPLAY_PROFILES = (
     ReplayProfile(2601, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW, "delivery_high", "delivery_carrier_degradation"),
     ReplayProfile(2602, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW, "delivery_high", "delivery_carrier_degradation"),
     ReplayProfile(2603, "severe", LIVE_REPLAY_INCIDENT_START_WINDOW, "delivery_high", "delivery_carrier_degradation"),
+    ReplayProfile(2701, "severe", None, "mixed_categories", "mixed_categories"),
+    ReplayProfile(2702, "severe", None, "mixed_categories", "mixed_categories"),
+    ReplayProfile(2703, "severe", None, "mixed_categories", "mixed_categories"),
 )
 LIVE_REPLAY_BASELINE_SEED = 20260401
 LIVE_REPLAY_BASELINE_CACHE_VERSION = 1
@@ -190,6 +193,100 @@ def _negative_binomial(rng: random.Random, mean: float, shape: float) -> int:
     return _poisson(rng, latent_mean)
 
 
+def _generate_mixed_category_run(config: SimulationConfig,
+                                include_ticket_events: bool) -> Iterator[GeneratedWindow]:
+    """Overlay one to three hidden, seeded conditions on ordinary category traffic.
+
+    Only generated tickets and operational records are returned. Driver identity,
+    affected-category intent, and generator decisions never enter event payloads.
+    """
+    base_config = replace(config, scenario="healthy", incident_start_window=None,
+                          incident_severity="none")
+    windows = list(generate_run(base_config, include_ticket_events=include_ticket_events))
+    driver_rng = random.Random(config.seed ^ 0x71C0A55)
+    count_rng = random.Random(config.seed ^ 0xA11CE55)
+    ticket_rng = random.Random(config.seed ^ 0x71C0A56)
+
+    # Each condition has one shared operational service/dependency and two
+    # customer-facing categories with independently lagged ticket effects.
+    driver_templates = (
+        ("checkout-orchestrator", "payments", "orders", "checkout configuration deployment"),
+        ("identity-service", "account", "payments", "identity provider capacity change"),
+        ("fulfillment-platform", "orders", "delivery", "fulfillment worker deployment"),
+        ("customer-profile-api", "account", "delivery", "customer profile service update"),
+    )
+    driver_count = driver_rng.randint(1, 3)
+    selected = driver_rng.sample(driver_templates, driver_count)
+    minimum_start = max(config.calibration_windows, config.monitor_history_windows, 1)
+    latest_start = max(minimum_start, config.window_count - 20)
+    start_span = max(1, latest_start - minimum_start + 1)
+    category_samples = {
+        "payments": ("payment_timeout", "Checkout payment did not finish",
+                     "The payment step timed out and I could not confirm whether checkout completed."),
+        "orders": ("order_processing_delay", "Order is still processing",
+                   "My order is still processing and I have not received the expected status update."),
+        "account": ("account_access_failure", "I cannot access my account",
+                    "The account page failed while I was signing in or updating my details."),
+        "delivery": ("delivery_status_delay", "Delivery status has not updated",
+                     "The delivery status has not changed and I cannot get a current update."),
+    }
+
+    for driver_index, (service, first_category, second_category, change_summary) in enumerate(selected):
+        start_window = minimum_start + driver_rng.randrange(start_span)
+        duration = driver_rng.randint(4, min(16, max(4, config.window_count - start_window)))
+        end_window = min(config.window_count, start_window + duration)
+        change_key = f"CHG-{driver_rng.randrange(100000, 999999)}"
+        change_time = datetime.fromisoformat(windows[start_window].start.replace("Z", "+00:00"))
+        windows[start_window].events.append(GeneratedEvent(
+            simulated_at=_iso(change_time + timedelta(minutes=1)), source="change_log",
+            event_type="change_record",
+            payload={"change_key": change_key, "service": service, "summary": change_summary,
+                     "outcome": "monitoring_required", "author": "service-owner"},
+        ))
+
+        for category in (first_category, second_category):
+            lag = driver_rng.randint(0, 2)
+            category_start = start_window + lag
+            category_end = min(config.window_count, end_window + lag)
+            effect_mean = driver_rng.uniform(15.0, 25.0)
+            for index in range(category_start, category_end):
+                window = windows[index]
+                added_tickets = _poisson(count_rng, effect_mean)
+                if added_tickets == 0:
+                    added_tickets = 1
+                window.category_counts[category] += added_tickets
+                window.ticket_count += added_tickets
+                window_time = datetime.fromisoformat(window.start.replace("Z", "+00:00"))
+                elapsed = index - category_start
+                requests = 300 + _poisson(count_rng, 40.0)
+                errors = max(1, int(added_tickets * 1.8) + _poisson(count_rng, 3.0))
+                latency = 250 + 180 * elapsed + _poisson(count_rng, 90)
+                window.events.append(GeneratedEvent(
+                    simulated_at=_iso(window_time + timedelta(minutes=12)), source="product_logs",
+                    event_type="service_log_summary",
+                    payload={"service": service, "requests": requests, "errors": errors,
+                             "p95_latency_ms": latency, "level": "error",
+                             "message": f"Elevated errors and latency observed for {service}."},
+                ))
+                if include_ticket_events:
+                    reason, title, body = category_samples[category]
+                    for ticket_index in range(added_tickets):
+                        ticket_time = window_time + timedelta(minutes=ticket_rng.randrange(30))
+                        window.events.append(GeneratedEvent(
+                            simulated_at=_iso(ticket_time), source="support_tickets",
+                            event_type="ticket_created",
+                            payload={"ticket_key": f"SUP-{config.seed}-{index:03d}-{category}-{ticket_rng.randrange(100000, 999999)}",
+                                     "window_index": index, "title": title, "body": body,
+                                     "reason": reason, "category": category,
+                                     "channel": ticket_rng.choice(("web", "email", "chat")),
+                                     "customer_tier": ticket_rng.choice(("standard", "standard", "plus"))},
+                        ))
+
+    for window in windows:
+        window.events.sort(key=lambda event: event.simulated_at)
+    yield from windows
+
+
 def _binomial(rng: random.Random, trials: int, probability: float) -> int:
     return sum(rng.random() < probability for _ in range(max(0, trials)))
 
@@ -207,6 +304,9 @@ def generate_run(config: SimulationConfig, include_ticket_events: bool = True) -
     """
     if config.window_count < 4:
         raise ValueError("window_count must be at least 4")
+    if config.scenario == "mixed_categories":
+        yield from _generate_mixed_category_run(config, include_ticket_events)
+        return
     if config.calibration_windows < 1 or config.calibration_windows >= config.window_count:
         raise ValueError("calibration_windows must be between 1 and window_count - 1")
     if config.incident_duration_windows < 1:

@@ -87,6 +87,29 @@ def test_category_scenario_selects_its_seeded_replay_profile():
         assert config.incident_duration_windows == 4
 
 
+def test_mixed_category_scenario_selects_a_seeded_mixed_profile():
+    runtime = FakeRuntime()
+    profile = next(item for item in LIVE_REPLAY_PROFILES if item.live_scenario == "mixed_categories")
+    with patch("agentic_ops.api.choose_live_replay_profile", return_value=profile) as choose:
+        response = TestClient(create_app(runtime)).post("/api/runs", json={
+            "randomized_week": True, "live_scenario": "mixed_categories",
+        })
+    assert response.status_code == 202
+    choose.assert_called_once_with(live_scenario="mixed_categories")
+    config = runtime.start_run.call_args.args[0]
+    assert config.scenario == "mixed_categories"
+    assert config.seed == profile.seed
+    assert config.incident_start_window is None
+
+
+def test_mixed_category_profile_rejects_a_seed_from_another_scenario():
+    profile = next(item for item in LIVE_REPLAY_PROFILES if item.live_scenario == "orders_high")
+    response = TestClient(create_app(FakeRuntime())).post("/api/runs", json={
+        "randomized_week": True, "live_scenario": "mixed_categories", "seed": profile.seed,
+    })
+    assert response.status_code == 422
+
+
 def test_category_scenario_rejects_seed_from_another_category():
     profile = next(item for item in LIVE_REPLAY_PROFILES if item.live_scenario == "orders_high")
     response = TestClient(create_app(FakeRuntime())).post("/api/runs", json={
@@ -159,3 +182,19 @@ def test_nonpayment_profiles_alert_in_their_own_category_with_aligned_evidence()
         )
         assert incident_windows == [216, 217, 218, 219]
         assert alerted_categories == {category}
+
+
+def test_mixed_category_profile_can_emit_independent_alerts_in_multiple_categories():
+    profile = next(item for item in LIVE_REPLAY_PROFILES if item.live_scenario == "mixed_categories")
+    config = SimulationConfig(scenario=profile.scenario, seed=profile.seed, window_count=336,
+                              calibration_windows=192, monitor_history_windows=192,
+                              playback_duration_seconds=120.0, incident_severity="severe")
+    detector = CategoryDetectorSuite("poisson", 192, CATEGORIES)
+    alerted_categories = set()
+    for window in generate_live_week(config):
+        result = detector.update(CountObservation(window.index, window.start, window.end,
+                                                  window.category_counts))
+        if window.index >= 192:
+            alerted_categories.update(category for category, score in result.categories.items()
+                                      if score.alerted)
+    assert len(alerted_categories) >= 2

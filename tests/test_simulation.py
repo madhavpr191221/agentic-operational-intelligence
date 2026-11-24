@@ -1,6 +1,6 @@
 import unittest
 
-from agentic_ops.domain import SimulationConfig
+from agentic_ops.domain import CATEGORIES, SimulationConfig
 from agentic_ops.simulation import generate_run
 
 
@@ -96,6 +96,44 @@ class SimulationTests(unittest.TestCase):
             for window in full:
                 tickets = [event for event in window.events if event.source == "support_tickets"]
                 self.assertEqual(len(tickets), window.ticket_count)
+
+    def test_mixed_category_run_is_seeded_and_has_multiple_affected_categories(self):
+        config = SimulationConfig(scenario="mixed_categories", seed=2701, window_count=96,
+                                  calibration_windows=48)
+        first = list(generate_run(config))
+        second = list(generate_run(config))
+        self.assertEqual(
+            [(w.start, w.end, w.category_counts, [(e.simulated_at, e.source, e.event_type, e.payload) for e in w.events])
+             for w in first],
+            [(w.start, w.end, w.category_counts, [(e.simulated_at, e.source, e.event_type, e.payload) for e in w.events])
+             for w in second],
+        )
+        affected = {
+            category for category in CATEGORIES
+            if sum(window.category_counts[category] for window in first[48:])
+            > sum(window.category_counts[category] for window in first[:48])
+        }
+        self.assertGreaterEqual(len(affected), 2)
+        for window in first:
+            tickets = [event for event in window.events if event.source == "support_tickets"]
+            self.assertEqual(len(tickets), window.ticket_count)
+            self.assertEqual(sum(window.category_counts.values()), window.ticket_count)
+            self.assertEqual({category: sum(event.payload["category"] == category for event in tickets)
+                              for category in CATEGORIES}, window.category_counts)
+            self.assertFalse(any("driver" in str(event.payload).lower()
+                                 or "root_cause" in event.payload for event in window.events))
+
+    def test_mixed_category_counts_only_mode_preserves_counts_and_omits_tickets(self):
+        config = SimulationConfig(scenario="mixed_categories", seed=2702, window_count=72,
+                                  calibration_windows=36)
+        full = list(generate_run(config))
+        counts_only = list(generate_run(config, include_ticket_events=False))
+        self.assertEqual([window.category_counts for window in full],
+                         [window.category_counts for window in counts_only])
+        self.assertEqual([window.ticket_count for window in full],
+                         [window.ticket_count for window in counts_only])
+        self.assertTrue(all(not any(event.source == "support_tickets" for event in window.events)
+                            for window in counts_only))
 
 
 if __name__ == "__main__":

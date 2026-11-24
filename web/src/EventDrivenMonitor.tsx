@@ -62,7 +62,7 @@ type Attention = {
     status: string; delivery_mode: string; attempt_count: number; last_error?: string | null}>
 }
 type Health = { investigator_mode: string; openai_key_configured: boolean }
-type LiveScenario = 'payments_normal' | 'payments_medium' | 'payments_high' | 'orders_high' | 'account_high' | 'delivery_high'
+type LiveScenario = 'payments_normal' | 'payments_medium' | 'payments_high' | 'orders_high' | 'account_high' | 'delivery_high' | 'mixed_categories'
 type DetectorScore = { detector: string; score: number; threshold: number; anomalous: boolean }
 type ScorePoint = { score: number; threshold: number }
 
@@ -87,9 +87,11 @@ function formatTime(value?: string | null) {
 const liveScenarioNames: Record<LiveScenario, string> = {
   payments_normal: 'Payments · Normal', payments_medium: 'Payments · Medium spike', payments_high: 'Payments · High spike',
   orders_high: 'Orders · High spike', account_high: 'Account sign-in · High spike', delivery_high: 'Delivery · High spike',
+  mixed_categories: 'Mixed categories · seeded scenario',
 }
 
 function runLiveScenario(value?: Run | null): LiveScenario {
+  if (value?.scenario === 'mixed_categories') return 'mixed_categories'
   if (value?.scenario === 'orders_queue_backlog') return 'orders_high'
   if (value?.scenario === 'account_identity_outage') return 'account_high'
   if (value?.scenario === 'delivery_carrier_degradation') return 'delivery_high'
@@ -165,7 +167,7 @@ export default function EventDrivenMonitor({ onOpenInbox }: { onOpenInbox: () =>
   const [attentionItems, setAttentionItems] = useState<Attention[]>([])
   const [queue, setQueue] = useState<{queued: number; running: number; pending_followups: number; oldest_wait_seconds: number | null} | null>(null)
   const [health, setHealth] = useState<Health | null>(null)
-  const [liveScenario, setLiveScenario] = useState<LiveScenario>('payments_high')
+  const [liveScenario, setLiveScenario] = useState<LiveScenario>('mixed_categories')
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     try { return localStorage.getItem('signalroom-theme') === 'light' ? 'light' : 'dark' } catch { return 'dark' }
   })
@@ -486,6 +488,7 @@ export default function EventDrivenMonitor({ onOpenInbox }: { onOpenInbox: () =>
         <summary>{run ? 'Replay settings' : 'Choose a demo and start'}</summary>
         <div className="replay-fields">
           <label className="field"><span>Demo scenario</span><select value={liveScenario} onChange={(event) => setLiveScenario(event.target.value as LiveScenario)}>
+            <optgroup label="Multi-category"><option value="mixed_categories">Mixed categories · seeded conditions</option></optgroup>
             <optgroup label="Payments"><option value="payments_normal">Normal</option><option value="payments_medium">Medium spike</option><option value="payments_high">High spike</option></optgroup>
             <optgroup label="Other categories"><option value="orders_high">Orders · processing backlog</option><option value="account_high">Account · sign-in failures</option><option value="delivery_high">Delivery · carrier degradation</option></optgroup>
           </select></label>
@@ -493,7 +496,9 @@ export default function EventDrivenMonitor({ onOpenInbox }: { onOpenInbox: () =>
             {busy ? 'Preparing…' : run ? 'Start new demo' : 'Start demo'}
           </button>
         </div>
-        <p className="replay-note">{liveScenario === 'payments_normal'
+        <p className="replay-note">{liveScenario === 'mixed_categories'
+          ? 'The seed chooses one to three hidden conditions that affect multiple categories at different times. Counts remain independently scored; co-occurring alerts do not imply a shared cause.'
+          : liveScenario === 'payments_normal'
           ? 'No incident is planted; the detector still watches for unusual counts.'
           : `${liveScenarioNames[liveScenario]} uses a seeded, single-category incident; the detector decides when it alerts.`} Four days prepare the baseline, then three days stream in about two minutes. An alert starts an OpenAI investigation automatically.</p>
         <p className={`openai-readiness ${openAiReady ? 'is-ready' : 'is-unavailable'}`} role="status">
