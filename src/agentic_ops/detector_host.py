@@ -294,7 +294,7 @@ class DetectorHost:
                                           event["episode_id"], self.stream_id, event["category"]))
                     if updated.rowcount != 1:
                         raise ValueError("Cannot update an unknown episode")
-                    if automatic and event["event_type"] in {"episode_updated", "episode_ended"}:
+                    if automatic and event["event_type"] == "episode_updated":
                         self._queue_material_followup(db, event)
                 db.execute("INSERT INTO applied_episode_events (event_id,stream_id,applied_at) VALUES (?,?,?)",
                            (event["event_id"], self.stream_id, utc_now()))
@@ -311,13 +311,24 @@ class DetectorHost:
     def _queue_material_followup(self, db: sqlite3.Connection, event: dict[str, Any]) -> None:
         """Queue at most one follow-up per window when linked evidence changes materially."""
         category = event["category"]
-        service = {"payments": "checkout-payments", "orders": "orders-api",
-                   "delivery": "delivery-api", "account": "account-api"}.get(category)
-        if service is None:
+        own_service = {"payments": "checkout-payments", "orders": "orders-api",
+                       "delivery": "delivery-api", "account": "account-api"}.get(category)
+        if own_service is None:
             return
+        episode_id = event["episode_id"]
+        service_categories: dict[str, set[str]] = {own_service: {category}}
+        related = db.execute(
+            "SELECT g.shared_system,i.category FROM incident_relationship_members m "
+            "JOIN incident_relationship_groups g ON g.group_id=m.group_id "
+            "JOIN incident_relationship_members peer ON peer.group_id=g.group_id "
+            "JOIN incidents i ON i.incident_id=peer.incident_id "
+            "WHERE m.incident_id=? AND g.status IN ('possible','reaffirmed')",
+            (episode_id,),
+        ).fetchall()
+        for row in related:
+            service_categories.setdefault(str(row["shared_system"]), set()).add(str(row["category"]))
         window = event["window"]
         start, end = window["window_start"], window["window_end"]
-        episode_id = event["episode_id"]
         latest_job = db.execute(
             "SELECT * FROM incident_jobs WHERE incident_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
             (episode_id,),
@@ -335,7 +346,7 @@ class DetectorHost:
         current_logs: list[dict[str, Any]] = []
         for row in current:
             payload = json.loads(row["payload_json"])
-            if payload.get("service") != service:
+            if payload.get("service") not in service_categories:
                 continue
             if row["source"] == "product_logs":
                 current_logs.append(payload)
@@ -368,36 +379,18 @@ class DetectorHost:
             requests = int(payload.get("requests") or 0)
             errors = int(payload.get("errors") or 0)
             error_rate = errors / requests if requests else 0.0
-            if service == "checkout-payments":
-                degraded = error_rate >= 0.10
-            elif service == "orders-api":
-                degraded = int(payload.get("queue_depth") or 0) > 100 or error_rate >= 0.10
-            elif service == "delivery-api":
-                degraded = int(payload.get("p95_latency_ms") or 0) >= 1000 or error_rate >= 0.10
-            else:
-                degraded = error_rate >= 0.10
             previous = db.execute(
                 "SELECT payload_json FROM events WHERE run_id=? AND source='product_logs' "
                 "AND event_type='service_log_summary' AND simulated_at<? "
                 "AND COALESCE(json_extract(payload_json,'$.available_at'),simulated_at)<? "
                 "AND json_extract(payload_json,'$.service')=? ORDER BY simulated_at DESC,sequence DESC LIMIT 1",
-                (self.stream_id, start, start, service),
+                (self.stream_id, start, start, payload.get("service")),
             ).fetchone()
-            if previous:
-                old = json.loads(previous["payload_json"])
-                old_requests = int(old.get("requests") or 0)
-                old_rate = int(old.get("errors") or 0) / old_requests if old_requests else 0.0
-                if service == "checkout-payments":
-                    was_degraded = old_rate >= 0.10
-                elif service == "orders-api":
-                    was_degraded = int(old.get("queue_depth") or 0) > 100 or old_rate >= 0.10
-                elif service == "delivery-api":
-                    was_degraded = int(old.get("p95_latency_ms") or 0) >= 1000 or old_rate >= 0.10
-                else:
-                    was_degraded = old_rate >= 0.10
+            old = json.loads(previous["payload_json"]) if previous else None
+            for related_category in service_categories[str(payload.get("service"))]:
+                degraded = _service_is_degraded(payload, related_category)
+                was_degraded = _service_is_degraded(old, related_category) if old else False
                 changed = changed or (was_degraded != degraded)
-            elif degraded:
-                changed = True
         if not changed:
             return
         sequence = db.execute("SELECT COALESCE(MAX(sequence),0) FROM events WHERE run_id=?",
@@ -408,9 +401,8 @@ class DetectorHost:
                    "sequence_bound=excluded.sequence_bound,episode_json=excluded.episode_json,event_id=excluded.event_id "
                    "WHERE excluded.cutoff > pending_investigation_followups.cutoff",
                    (episode_id, self.stream_id, end, sequence, _json(event["episode"]), event["event_id"]))
-
     def observe_completed_window(self, observation: CountObservation, automatic: bool) -> None:
-        """Watch the latest episode per category for evidence, even after it ends."""
+        """Watch the latest still-active episode per category for material evidence."""
         if not automatic:
             return
         with self.store._connection() as db:
@@ -423,6 +415,8 @@ class DetectorHost:
                 if category in seen:
                     continue
                 seen.add(category)
+                if incident["status"] != "active":
+                    continue
                 if observation.window_start < incident["opened_at"]:
                     continue
                 event = {"category": category, "episode_id": incident["incident_id"],
@@ -430,6 +424,17 @@ class DetectorHost:
                          "episode": json.loads(incident["episode_json"]),
                          "window": {"window_start": observation.window_start, "window_end": observation.window_end}}
                 self._queue_material_followup(db, event)
+
+
+def _service_is_degraded(payload: dict[str, Any], category: str) -> bool:
+    requests = int(payload.get("requests") or 0)
+    errors = int(payload.get("errors") or 0)
+    error_rate = errors / requests if requests else 0.0
+    if category == "orders":
+        return int(payload.get("queue_depth") or 0) > 100 or error_rate >= 0.10
+    if category == "delivery":
+        return int(payload.get("p95_latency_ms") or 0) >= 1000 or error_rate >= 0.10
+    return error_rate >= 0.10
 
 
 def list_incidents(store: EventStore, stream_id: str | None = None) -> list[dict[str, Any]]:

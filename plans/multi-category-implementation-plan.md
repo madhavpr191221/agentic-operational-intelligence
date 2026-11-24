@@ -9,7 +9,7 @@ This plan implements the accepted multi-category replay and incident-context des
 | 1. Mixed replay | Complete | Seed selects one to three hidden conditions across categories; see `docs/results/stage-1-mixed-category-replay.md` |
 | 2. Snapshot context | Complete | Each investigation freezes same-replay incident context at its evidence cutoff; see `docs/results/stage-2-cross-category-context.md` |
 | 3. Relationship groups | Complete | Evidence-backed relationships are versioned independently of incidents; see `docs/results/stage-3-relationship-groups.md` |
-| 4. Evidence updates | Planned | Later material evidence reaches existing open episodes under current follow-up policy |
+| 4. Evidence updates | Complete | Later material evidence updates eligible open episodes under current follow-up policy; see `docs/results/stage-4-evidence-updates.md` |
 | 5. Requested comparison | Planned | Operator can request a durable comparison without merging incident workspaces |
 
 ## Stage 1 - Seeded mixed-category replay
