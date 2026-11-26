@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="420" viewBox="0 0 900 420"><rect width="100%" height="100%" fill="#fff"/>
+<style>text{font-family:Arial,sans-serif;fill:#20242a}.small{font-size:12px}.title{font-size:18px;font-weight:bold}.grid{stroke:#d7dce2}.axis{stroke:#303840;stroke-width:1.3}</style>
+<text class="title" x="450" y="25" text-anchor="middle">Exact lag recovery on held-out shared-pattern streams</text>
+<line class="grid" x1="100" y1="335.0" x2="800" y2="335.0"/>
+<text class="small" x="90" y="339.0" text-anchor="end">0.00</text>
+<line class="grid" x1="100" y1="265.0" x2="800" y2="265.0"/>
+<text class="small" x="90" y="269.0" text-anchor="end">0.25</text>
+<line class="grid" x1="100" y1="195.0" x2="800" y2="195.0"/>
+<text class="small" x="90" y="199.0" text-anchor="end">0.50</text>
+<line class="grid" x1="100" y1="125.0" x2="800" y2="125.0"/>
+<text class="small" x="90" y="129.0" text-anchor="end">0.75</text>
+<line class="grid" x1="100" y1="55.0" x2="800" y2="55.0"/>
+<text class="small" x="90" y="59.0" text-anchor="end">1.00</text>
+<circle cx="100.0" cy="309.24" r="5" fill="#1769aa"/>
+<circle cx="275.0" cy="307.56" r="5" fill="#1769aa"/>
+<circle cx="450.0" cy="314.84" r="5" fill="#1769aa"/>
+<circle cx="625.0" cy="310.92" r="5" fill="#1769aa"/>
+<circle cx="800.0" cy="310.92" r="5" fill="#1769aa"/>
+<polyline fill="none" stroke="#1769aa" stroke-width="2" points="100.0,309.24 275.0,307.56 450.0,314.84 625.0,310.92 800.0,310.92"/>
+<circle cx="100.0" cy="326.04" r="5" fill="#c45118"/>
+<circle cx="275.0" cy="324.36" r="5" fill="#c45118"/>
+<circle cx="450.0" cy="330.52" r="5" fill="#c45118"/>
+<circle cx="625.0" cy="329.4" r="5" fill="#c45118"/>
+<circle cx="800.0" cy="327.72" r="5" fill="#c45118"/>
+<polyline fill="none" stroke="#c45118" stroke-width="2" points="100.0,326.04 275.0,324.36 450.0,330.52 625.0,329.4 800.0,327.72"/>
+<text class="small" x="100.0" y="355" text-anchor="middle">Sync</text>
+<text class="small" x="275.0" y="355" text-anchor="middle">1 window</text>
+<text class="small" x="450.0" y="355" text-anchor="middle">2 windows</text>
+<text class="small" x="625.0" y="355" text-anchor="middle">3 windows</text>
+<text class="small" x="800.0" y="355" text-anchor="middle">4 windows</text>
+<line class="axis" x1="100" y1="335" x2="800" y2="335"/>
+<line class="axis" x1="100" y1="55" x2="100" y2="335"/>
+<text class="small" transform="translate(22 195) rotate(-90)" text-anchor="middle">Exact category and lag recovery rate</text>
+<circle cx="610" cy="390" r="5" fill="#1769aa"/><text class="small" x="620" y="394">Positive residual scan</text>
+<circle cx="760" cy="390" r="5" fill="#c45118"/><text class="small" x="770" y="394">Gamma-Poisson</text></svg>
